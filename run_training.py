@@ -3,84 +3,197 @@
 import os
 
 import comet_ml
-
 import torch
-from torch.utils.data import DataLoader
-
-from config import Config, load_config
-from data import CLEVRSplit, CLEVRTextSplit
-from model import Model, TextualModel, TrainingModel
-
 
 import lightning as L
-from lightning import Trainer
+from lightning import Trainer, seed_everything
 from lightning.pytorch.loggers.comet import CometLogger
+from lightning.pytorch.loggers.wandb import WandbLogger
+from lightning.pytorch.loggers.csv_logs import CSVLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
+
+from config import Config, load_config
+from data import build_datasets, build_loader, build_detailed_test_dataloaders
+from data import CurriculumData, CurriculumScheduler
+from model import build_model
 
 
 def log_to_comet():
     return 'COMET_API_KEY' in os.environ and 'COMET_WORKSPACE' in os.environ
 
-torch.backends.cudnn.benchmark = True
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def log_to_wandb():
+    # return 'COMET_API_KEY' in os.environ and 'COMET_WORKSPACE' in os.environ
+    return True
 
-# config = Config()
-config = load_config()
-if config.use_txt_scene:
-    train_dataset, test_dataset, systematic_dataset = CLEVRTextSplit.build_splits(config)
-else:
-    train_dataset, test_dataset, systematic_dataset = CLEVRSplit.build_splits(config)
+def log_to_csv():
+    return True
 
-config.pad_idx = train_dataset.pad_idx
+def build_trainer(config, experiment_name, checkpoint_path):
+    callbacks = []
+    if not os.path.exists(checkpoint_path):
+        os.makedirs(checkpoint_path, exist_ok=True)
+    save_top_k = -1 if config.multimodal_pretraining else 1 # if pre-training save all checkpoints
+    callbacks.append(ModelCheckpoint(dirpath=checkpoint_path,
+                                     save_top_k=save_top_k,
+                                     monitor="val_loss/dataloader_idx_0",
+                                     every_n_epochs=10,
+                                     save_last=True))
+    if config.use_curriculum:
+        schedule = [tuple(range(3,i+1)) for i in range(3,10)] + [(0,)] # 3 to 10 ojects
+        callbacks.append(CurriculumScheduler(schedule, config.max_epochs))
 
-dlkwargs = {
-    'batch_size': config.batch_size,
-    'num_workers': int(os.environ.get("SLURM_JOB_CPUS_PER_NODE", 4)),
-    'pin_memory': torch.cuda.is_available(),
-}
+    loggers = []
+    if log_to_comet():
+        comet_logger = CometLogger(
+            api_key=os.environ.get("COMET_API_KEY"),
+            workspace=os.environ.get("COMET_WORKSPACE"),
+            project_name='systematic-text-representation',
+            experiment_name=experiment_name,
+            experiment_key=config.comet_experiment_key,
+        )
+        comet_logger.log_hyperparams(vars(config))
+        config.comet_experiment_key = comet_logger.experiment.get_key()
+        loggers.append(comet_logger)
 
-train_loader = DataLoader(train_dataset, shuffle=True, **dlkwargs)
-test_loader = DataLoader(test_dataset, shuffle=False, **dlkwargs)
-systematic_loader = DataLoader(systematic_dataset, shuffle=False, **dlkwargs)
+    if log_to_wandb():
+        wandb_logger = WandbLogger(
+            project='systematic-text-representation',
+            name=experiment_name,
+            version=config.wandb_experiment_id,
+        )
+        wandb_logger.log_hyperparams(vars(config))
+        config.wandb_experiment_id = wandb_logger.version
+        loggers.append(wandb_logger)
 
-if config.use_txt_scene:
-    model = TextualModel(config)
-else:
-    model = Model(config)
-training_model = TrainingModel(model, config)
+    if log_to_csv():
+        output_path = f"outputs/{experiment_name}/"
+        csv_logger = CSVLogger(
+            output_path,
+            name='restults.csv'
+        )
+        csv_logger.log_hyperparams(vars(config))
+        loggers.append(csv_logger)
 
-experiment_name = os.environ.get("EXP_NAME", "default")
+    reload_dataloaders_every_n_epochs = 1 if config.use_curriculum else 0
+    if torch.cuda.device_count() > 1:
+        print(f'Working with: {torch.cuda.device_count()} GPUs')
+        return Trainer(max_epochs=config.max_epochs,
+                       accelerator="gpu",
+                       devices=torch.cuda.device_count(),
+                       strategy='ddp_find_unused_parameters_false',
+                       precision="16",
+                       logger=loggers,
+                       callbacks=callbacks,
+                       reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs)
 
-checkpoint_path = f"outputs/{experiment_name}/"
-if not os.path.exists(checkpoint_path):
-    os.mkdir(checkpoint_path)
-checkpoint_callback = ModelCheckpoint(
-    dirpath=checkpoint_path, save_top_k=1, monitor="val_loss/dataloader_idx_0", every_n_epochs=1, save_last=True)
+    else:
+        print(f'Working with: {torch.cuda.device_count()} GPU')
+        return Trainer(max_epochs=config.max_epochs,
+                       accelerator="gpu",
+                       # devices="auto",
+                       devices=torch.cuda.device_count(),
+                       logger=loggers,
+                       callbacks=callbacks,
+                       reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs)
 
-resume_from_path = None
-if config.resume_training:
-    resume_from_path = f'{checkpoint_path}/last.ckpt'
+def build_tester(config, experiment_name):
+    loggers = []
+    if log_to_comet():
+        comet_logger = CometLogger(
+            api_key=os.environ.get("COMET_API_KEY"),
+            workspace=os.environ.get("COMET_WORKSPACE"),
+            project_name='systematic-text-representation',
+            experiment_key=config.comet_experiment_key,
+            experiment_name=experiment_name,
+        )
+        config.comet_experiment_key = comet_logger.experiment.get_key()
+        loggers.append(comet_logger)
 
-comet_logger = None
-if log_to_comet():
-    comet_logger = CometLogger(
-        api_key=os.environ.get("COMET_API_KEY"),
-        workspace=os.environ.get("COMET_WORKSPACE"),
-        project_name='systematic-text-representation',
-        experiment_key=os.environ.get("COMET_EXPERIMENT_KEY"),
-        experiment_name=experiment_name,
+    if log_to_wandb():
+        wandb_logger = WandbLogger(
+            project='systematic-text-representation',
+            name=experiment_name,
+            version=config.wandb_experiment_id,
+        )
+        # wandb_logger.log_hyperparams(vars(config))
+        config.wandb_experiment_id = wandb_logger.version
+        loggers.append(wandb_logger)
+
+    print(f'Working with: {torch.cuda.device_count()} GPU')
+    return Trainer(max_epochs=config.max_epochs,
+                   accelerator="gpu",
+                   devices=1,
+                   precision="16",
+                   logger=loggers)
+
+
+def main(config):
+    seed_everything(config.seed, workers=True)
+
+    torch.backends.cudnn.benchmark = True
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
+
+    experiment_name = os.environ.get("EXP_NAME", "default")
+
+    if config.use_curriculum:
+        print('Creating CurriculumData')
+        datamodule = CurriculumData(config)
+        train_data_args = test_data_args = {
+            'datamodule': datamodule,
+        }
+    else:
+        train_dataset, test_dataset, systematic_dataset = build_datasets(config)
+        config.pad_idx = train_dataset.pad_idx
+
+        train_loader = build_loader(train_dataset, config, shuffle=True)
+        test_loader = build_loader(test_dataset, config, shuffle=False)
+        systematic_loader = build_loader(systematic_dataset, config, shuffle=False)
+        test_detailed_loaders = build_detailed_test_dataloaders(test_dataset, config) # type_of_tokens_to_test
+        systematic_detailed_loaders = build_detailed_test_dataloaders(systematic_dataset, config) # type_of_tokens_to_test
+        train_data_args = {
+            'train_dataloaders': train_loader,
+            'val_dataloaders': [
+                    test_loader, systematic_loader,
+                    test_detailed_loaders['color'], systematic_detailed_loaders['color'],
+                    test_detailed_loaders['shapes'], systematic_detailed_loaders['shapes'],
+                    ],
+        }
+        test_data_args = {
+            'dataloaders': [test_loader, systematic_loader],
+        }
+
+    training_model = build_model(config)
+
+    checkpoint_path = f"outputs/{experiment_name}/"
+    resume_from_path = None
+    if config.resume_training:
+        resume_from_path = f'{checkpoint_path}/last.ckpt'
+
+    trainer = build_trainer(config, experiment_name, checkpoint_path)
+    tester = build_tester(config, experiment_name)
+
+    trainer.fit(
+        training_model,
+        ckpt_path=resume_from_path,
+        **train_data_args,
     )
-    comet_logger.log_hyperparams(vars(config))
+    tester.test(
+        training_model,
+        ckpt_path=f'{checkpoint_path}/last.ckpt',
+        **test_data_args,
+    )
 
-if config.profile:
-    trainer = Trainer(max_steps=2000, accelerator="gpu", devices=1, profiler="simple",
-                      enable_progress_bar=False)
-else:
-    trainer = Trainer(max_epochs=config.max_epochs, accelerator="gpu", devices=1,
-                        logger=comet_logger, callbacks=[checkpoint_callback])
+    for entity_to_test in test_detailed_loaders:
+        detailed_test_loader = test_detailed_loaders[entity_to_test]
+        detailed_systematic_loader = systematic_detailed_loaders[entity_to_test]
+
+        training_model.set_exp_prefix(entity_to_test)
+        tester.test(training_model,
+                    ckpt_path=f'{checkpoint_path}/last.ckpt',
+                    dataloaders=[detailed_test_loader, detailed_systematic_loader])
 
 
-trainer.fit(training_model, train_loader, val_dataloaders=[test_loader, systematic_loader],
-            ckpt_path=resume_from_path)
-
-trainer.test(training_model, dataloaders=[test_loader, systematic_loader])
+if __name__ == "__main__":
+    config = load_config()
+    main(config)

@@ -1,5 +1,7 @@
 from argparse import ArgumentParser
+import os
 
+import torch
 
 class Config:
     def __init__(self):
@@ -21,35 +23,82 @@ class Config:
         self.lr = 1e-3
 
 
-def load_config():
+def load_config(experiment_name=""):
+    config, parser = read_args()
+    if not config.resume_training and not experiment_name:
+        return config
+
+    experiment_name = os.environ.get("EXP_NAME", experiment_name)
+    checkpoint_path = f"outputs/{experiment_name}/last.ckpt"
+
+    print(f'Loading {experiment_name} last checkpoint config from {checkpoint_path}')
+    checkpoint_config = load_config_from_checkpoint(checkpoint_path)
+
+    # Get args setted for this run
+    non_default_args = get_non_default_args(parser, config)
+    # override original args with new args
+    for k, v in non_default_args.items():
+        print(f'Updating arg: {k} = {v}')
+        setattr(checkpoint_config, k, v)
+
+    # also set new args
+    for k, v in vars(config).items():
+        if hasattr(checkpoint_config, k):
+            continue
+        print(f'Add new arg: {k} = {v}')
+        setattr(checkpoint_config, k, v)
+
+    return checkpoint_config
+
+
+def read_args():
     parser = ArgumentParser()
 
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0')
+    parser.add_argument("--comet_experiment_key", type=str, default=None)
+    parser.add_argument("--wandb_experiment_id", type=str, default=None)
     parser.add_argument("--vocabulary_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0/vocab.txt')
     parser.add_argument("--pad_idx", type=int, default=0)
-    parser.add_argument("--n_tokens", type=int, default=95)
+    parser.add_argument("--n_tokens", type=int, default=96)
     parser.add_argument("--n_outputs", type=int, default=28)
     parser.add_argument("--max_question_size", type=int, default=45)
-    parser.add_argument("--max_scene_size", type=int, default=259)
+    parser.add_argument("--max_scene_size", type=int, default=260)
     parser.add_argument("--rels_to_sample", type=int, default=50)
     parser.add_argument("--d_hidden", type=int, default=256)
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--n_head", type=int, default=4)
-    parser.add_argument("--patch_height", type=int, default=32)
-    parser.add_argument("--patch_width", type=int, default=48)
+    parser.add_argument("--patch_height", type=int, default=16)
+    parser.add_argument("--patch_width", type=int, default=16)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--max_epochs", type=int, default=200)
+    parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--optimizer", type=str, default='adam')
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", action='store_true', default=False)
     parser.add_argument('--resume_training', action='store_true', default=False)
     parser.add_argument('--use_txt_scene', action='store_true', default=False)
+    parser.add_argument('--image_pretraining', action='store_true', default=False)
     parser.add_argument('--multimodal_pretraining', action='store_true', default=False)
+    parser.add_argument('--multimodal_training', action='store_true', default=False)
     parser.add_argument('--not_only_front_right_relations', dest='only_front_right_relations', action='store_false', default=True)
     parser.add_argument('--dont_filter_symmetric_relations', dest='filter_symmetric_relations', action='store_false', default=True)
     parser.add_argument('--display_object_properties', action='store_true', default=False)
-    parser.add_argument('--shuffle_object_identities', action='store_true', default=False)
+    parser.add_argument('--dont_shuffle_object_identities', dest='shuffle_object_identities', action='store_false', default=True)
     parser.add_argument('--aug_zero', type=int, default=0)
+    parser.add_argument("--aug_zero_independent", action='store_true', default=False)
+    parser.add_argument("--mlm_probability", type=float, default=0.15)
+    parser.add_argument("--mp_probability", type=float, default=0.75)
+    parser.add_argument('--start_from', type=str, default='')
+    parser.add_argument('--not_normalize_image', action='store_true', default=False)
+    parser.add_argument('--use_vit_embedding', action='store_true', default=False)
+    parser.add_argument('--use_embedding_loaded', type=str, default='')
+    parser.add_argument('--adapt_embedding_from', type=int, default=0)
+    parser.add_argument('--use_vit_embedding_loaded', action='store_true', default=False)
+    parser.add_argument('--freeze_vit_embedding', action='store_true', default=False)
+    parser.add_argument('--token_translation_path', type=str, default='')
+
+    parser.add_argument('--use_curriculum', action='store_true', default=False)
+
     parser.add_argument('--profile', action='store_true', default=False)
 
     # Parse the user inputs and defaults (returns a argparse.Namespace)
@@ -58,9 +107,41 @@ def load_config():
     else:
         args = parser.parse_args([])
 
-    args.n_patches = (320 // args.patch_height) * (480 // args.patch_width)
+    if args.use_vit_embedding or args.use_vit_embedding_loaded or args.use_embedding_loaded == 'vit':
+        args.patch_height = args.patch_width = 16
+        args.n_patches = (224 // args.patch_height) * (224 // args.patch_width) + 1 # Add CLS
+        args.not_normalize_image = True
+        args.adapt_embedding_from = 768
+    if args.use_embedding_loaded == 'shrn50':
+        args.patch_height = args.patch_width = 32
+        args.n_patches = 49 # Add CLS
+        args.not_normalize_image = True
+        args.adapt_embedding_from = 2048
+    elif args.image_pretraining:
+        args.patch_height = args.patch_width = 16
+        args.n_patches = (224 // args.patch_height) * (224 // args.patch_width) # + 1 Don't Add CLS
+        args.not_normalize_image = True
+    else:
+        # args.n_patches = (320 // args.patch_height) * (480 // args.patch_width)
+        args.patch_height = args.patch_width = 16
+        args.n_patches = (224 // args.patch_height) * (224 // args.patch_width)
+        args.not_normalize_image = False
 
-    return args
+    return args, parser
+
+
+def load_config_from_checkpoint(checkpoint_path):
+    checkpoint = torch.load(checkpoint_path)
+    config = checkpoint['hyper_parameters']['config']
+    return config
+
+
+def get_non_default_args(parser, args):
+    return {
+        opt.dest: getattr(args, opt.dest)
+        for opt in parser._option_string_actions.values()
+        if hasattr(args, opt.dest) and opt.default != getattr(args, opt.dest)
+    }
 
 
 def is_notebook() -> bool:

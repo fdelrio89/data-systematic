@@ -1,10 +1,308 @@
+from collections import defaultdict
 import os
 import json
+import h5py
 import random
 from tqdm.auto import tqdm
 from PIL import Image
+import functools
+import numpy as np
 import torch
-from torchvision.transforms import Compose, Normalize, ToTensor
+from torch.utils.data import default_collate
+from torch.utils.data import DataLoader
+from torch.utils.data import Subset
+from torchvision.transforms import Compose, Normalize, Resize, ToTensor
+import lightning as L
+
+def build_datasets(config):
+    if config.multimodal_pretraining:
+        if config.use_embedding_loaded or config.use_vit_embedding_loaded:
+            return CLEVRMultimodalFromFeaturesSplit.build_splits(config)
+        else:
+            return CLEVRMultimodalSplit.build_splits(config)
+    elif config.multimodal_training:
+        return CLEVRMultimodalTrainingSplit.build_splits(config)
+    elif config.image_pretraining:
+        return CLEVRMultimodalSplit.build_splits(config)
+    elif config.use_txt_scene:
+        return CLEVRTextSplit.build_splits(config)
+    else:
+        return CLEVRSplit.build_splits(config)
+
+
+def build_loader(dataset, config, shuffle=True, collate_fn=None):
+    dlkwargs = {
+        'batch_size': config.batch_size,
+        'num_workers': int(os.environ.get("SLURM_CPUS_PER_TASK", 4)),
+        'pin_memory': torch.cuda.is_available(),
+    }
+    if collate_fn:
+        dlkwargs['collate_fn'] = collate_fn
+    elif config.multimodal_pretraining:
+        dlkwargs['collate_fn'] = CollatorForMaskedLanguageModeling(
+            config, dataset.processor, mlm_probability=config.mlm_probability)
+
+    return DataLoader(dataset, shuffle=shuffle, **dlkwargs)
+
+
+def build_detailed_test_dataloaders(dataset, config, type_of_tokens_to_test=None):
+    processor = dataset.processor
+    vocab = processor.vocabulary
+    tokens_to_test = {
+        'relation': ['left', 'right', 'behind', 'front'],
+        # 'color': ['blue', 'brown', 'cyan', 'green', 'red', 'purple', 'yellow', 'gray'],
+        'color': ALL_POSSIBLE_COLORS,
+        'shapes': ['cylinder', 'sphere', 'cube'],
+        'materials': ['metal', 'rubber'],
+        'size': ['small', 'large'],
+    }
+    tokens_idx_to_test = {
+        k: sorted([vocab[w] for w in tokens if w in vocab]) for k, tokens in tokens_to_test.items()
+        if type_of_tokens_to_test is None or k in type_of_tokens_to_test
+        }
+
+    collators_for_testing = {
+        k: CollatorForMaskedSelectedTokens(config, processor, tokens=tokens)
+        for k, tokens in tokens_idx_to_test.items()
+        }
+    collators_for_testing['identity'] = IdentityCollator(config, processor)
+
+    return {k: build_loader(dataset, config, shuffle=False, collate_fn=collate_fn)
+            for k, collate_fn in collators_for_testing.items()}
+
+
+class CollatorForMaskedLanguageModeling:
+    def __init__(self, config, processor, mlm_probability=0.15):
+        self.config = config
+        self.mlm_probability = mlm_probability
+        self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
+        self.non_special_token_idxs = torch.tensor(processor.non_special_token_idxs).long()
+        self.mask_token_idx = processor.mask_token_idx
+        self.image_patch_sizes = config.patch_height, config.patch_width
+
+    def __call__(self, batch):
+        images, scenes = default_collate(batch)
+        scenes, scenes_labels = self.build_mlm_targets(scenes)
+        images_labels = self.build_null_image_targets(images)
+        labels = torch.cat((images_labels, scenes_labels), dim=1)
+        return images, scenes, labels
+
+    def build_null_image_targets(self, images):
+        b, *_ = images.shape
+        # n_patches = int(h / self.image_patch_sizes[0]) * int(w / self.image_patch_sizes[1])
+        n_patches = self.config.n_patches
+        return torch.full((b, n_patches), -100)
+
+    def random_tokens_like(self, input_, tokens):
+        p = torch.ones_like(tokens) / len(tokens)
+        idx = p.multinomial(num_samples=input_.numel(), replacement=True)
+        random_tokens = tokens[idx].reshape(input_.shape)
+        return random_tokens
+
+    def build_mlm_targets(self, inputs):
+        labels = inputs.clone()
+
+        probability_matrix = torch.full(labels.shape, self.mlm_probability)
+
+        special_tokens_mask = torch.isin(labels, self.special_token_idxs)
+
+        probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+        masked_indices = torch.bernoulli(probability_matrix).bool()
+
+        labels[~masked_indices] = -100  # We only compute loss on masked tokens
+
+        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+        indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
+        inputs[indices_replaced] = self.mask_token_idx
+
+        # 10% of the time, we replace masked input tokens with random word
+        indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+        random_words = self.random_tokens_like(labels, tokens=self.non_special_token_idxs)
+        inputs[indices_random] = random_words[indices_random]
+
+        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+        return inputs, labels
+
+
+class CollatorForMaskedSelectedTokens:
+    def __init__(self, config, processor, tokens):
+        self.config = config
+        self.token_to_mask_idxs = torch.tensor(tokens).long()
+        self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
+        self.mask_token_idx = processor.mask_token_idx
+        self.image_patch_sizes = config.patch_height, config.patch_width
+
+    def __call__(self, batch):
+        images, scenes = default_collate(batch)
+        scenes, scenes_labels = self.build_targets(scenes)
+        images_labels = self.build_null_image_targets(images)
+        labels = torch.cat((images_labels, scenes_labels), dim=1)
+        return images, scenes, labels
+
+    def build_null_image_targets(self, images):
+        b, *_ = images.shape
+        n_patches = self.config.n_patches
+        return torch.full((b, n_patches), -100)
+
+    def build_targets(self, inputs):
+        labels = inputs.clone()
+        masked_indices = torch.isin(labels, self.token_to_mask_idxs)
+        labels[~masked_indices] = -100
+        inputs[masked_indices] = self.mask_token_idx
+
+        return inputs, labels
+
+
+class CollatorForMaskedRandomSelectedTokens:
+    def __init__(self, config, processor, tokens, p):
+        self.config = config
+        self.token_to_mask_idxs = torch.tensor(tokens).long()
+        self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
+        self.mask_token_idx = processor.mask_token_idx
+        self.image_patch_sizes = config.patch_height, config.patch_width
+        self.p = p
+
+    def __call__(self, batch):
+        images, scenes = default_collate(batch)
+        scenes, scenes_labels = self.build_targets(scenes)
+        images_labels = self.build_null_image_targets(images)
+        labels = torch.cat((images_labels, scenes_labels), dim=1)
+        return images, scenes, labels
+
+    def build_null_image_targets(self, images):
+        b, *_ = images.shape
+        n_patches = self.config.n_patches
+        return torch.full((b, n_patches), -100)
+
+    def build_targets(self, inputs):
+        labels = inputs.clone()
+        masked_indices = torch.isin(labels, self.token_to_mask_idxs)
+        is_selected = torch.bernoulli(torch.full_like(labels, self.p, dtype=torch.float)).bool()
+        masked_indices = masked_indices & is_selected
+        labels[~masked_indices] = -100
+        inputs[masked_indices] = self.mask_token_idx
+
+        return inputs, labels
+
+
+class IdentityCollator:
+    def __init__(self, config, processor):
+        self.config = config
+        self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
+        self.image_patch_sizes = config.patch_height, config.patch_width
+
+    def __call__(self, batch):
+        images, scenes = default_collate(batch)
+        scenes, scenes_labels = self.build_targets(scenes)
+        images_labels = self.build_null_image_targets(images)
+        labels = torch.cat((images_labels, scenes_labels), dim=1)
+        return images, scenes, labels
+
+    def build_null_image_targets(self, images):
+        b, *_ = images.shape
+        n_patches = self.config.n_patches
+        return torch.full((b, n_patches), -100)
+
+    def build_targets(self, inputs):
+        labels = inputs.clone()
+        special_token_indices = torch.isin(labels, self.special_token_idxs)
+        labels[special_token_indices] = -100
+
+        return inputs, labels
+
+
+class CurriculumScheduler(L.Callback):
+    def __init__(self, schedule: list, max_epochs: int):
+        self.schedule = schedule
+        self.max_epochs = max_epochs
+
+        n_segments = len(self.schedule) # uniform segments
+        self.intervals = [(s[0],s[-1]+1) for s in np.array_split(range(self.max_epochs), n_segments)]
+
+    def _prepare_epoch(self, trainer, model, epoch):
+        current_stage = [stage for stage, interval in enumerate(self.intervals) if epoch in range(*interval)]
+        current_stage = current_stage[0]
+        n_objects_for_epoch = self.schedule[current_stage]
+        trainer.datamodule.train_with_n_objects = n_objects_for_epoch
+
+    def setup(self, trainer, model, stage):
+        # print('CurriculumScheduler.setup')
+        self._prepare_epoch(trainer, model, 0)
+
+    def on_train_epoch_end(self, trainer, model):
+        # print('CurriculumScheduler.on_train_epoch_end')
+        self._prepare_epoch(trainer, model, trainer.current_epoch + 1)
+
+
+class CurriculumData(L.LightningDataModule):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.train_with_n_objects = 0 # 0: all
+
+    def setup(self, stage: str):
+        print('Setting CV learning data up')
+        self.train_dataset, self.test_dataset, self.systematic_dataset = build_datasets(self.config)
+        all_combinations = [tuple(range(3,i+1)) for i in range(3,10+1)] + [(0,)]
+        self.train_subsets = {
+            combination: self.build_subset(self.train_dataset, combination) for combination in all_combinations
+        }
+
+    def build_len_index(self, dataset):
+        object_lens = defaultdict(list)
+        object_lens[0] = list(range(len(dataset)))
+        for idx, scene in enumerate(dataset.scenes):
+            n_objects_in_scene = len(scene['objects'])
+            object_lens[n_objects_in_scene].append(idx)
+        return object_lens
+
+    # @functools.lru_cache()
+    def build_subset(self, dataset, size_or_sizes):
+        if size_or_sizes == 0 or size_or_sizes == [0]:
+            return dataset
+
+        object_lens = self.build_len_index(dataset)
+        if isinstance(size_or_sizes, int):
+            sizes = [size_or_sizes]
+        elif isinstance(size_or_sizes, (tuple,list)):
+            sizes = size_or_sizes
+
+        indices = sorted([idx for size in sizes for idx in object_lens[size]])
+        return dataset.subset(indices)
+
+    def train_dataloader(self):
+        dataset = self.train_dataset
+        if self.train_with_n_objects:
+            # print(self.train_with_n_objects)
+            # print('Building loader with CV subset data')
+            # dataset = self.build_subset(dataset, self.train_with_n_objects)
+            dataset = self.train_subsets[self.train_with_n_objects]
+            # print(f'train_dataset len={len(dataset)}')
+        train_loader = build_loader(dataset, self.config, shuffle=True)
+        # print(f'train_loader len={len(train_loader)}')
+        return train_loader
+
+    def val_dataloader(self):
+        test_loader = build_loader(self.test_dataset, self.config, shuffle=False)
+        systematic_loader = build_loader(self.systematic_dataset, self.config, shuffle=False)
+        test_detailed_loaders = build_detailed_test_dataloaders(self.test_dataset, self.config) # type_of_tokens_to_test
+        systematic_detailed_loaders = build_detailed_test_dataloaders(self.systematic_dataset, self.config) # type_of_tokens_to_test
+        return [
+            test_loader, systematic_loader,
+            test_detailed_loaders['color'], systematic_detailed_loaders['color'],
+            test_detailed_loaders['shapes'], systematic_detailed_loaders['shapes'],
+        ]
+
+    def val_dataloader(self):
+        test_loader = build_loader(self.test_dataset, self.config, shuffle=False)
+        systematic_loader = build_loader(self.systematic_dataset, self.config, shuffle=False)
+        test_detailed_loaders = build_detailed_test_dataloaders(self.test_dataset, self.config) # type_of_tokens_to_test
+        systematic_detailed_loaders = build_detailed_test_dataloaders(self.systematic_dataset, self.config) # type_of_tokens_to_test
+        return [
+            test_loader, systematic_loader,
+            test_detailed_loaders['color'], systematic_detailed_loaders['color'],
+            test_detailed_loaders['shapes'], systematic_detailed_loaders['shapes'],
+        ]
 
 
 class CLEVRSplit:
@@ -26,15 +324,15 @@ class CLEVRSplit:
         image_filename = question['image_filename']
 
         image_path = f'{self.images_dir}/{image_filename}'
-        try:
-            image = Image.open(image_path).convert('RGB')
-        except OSError:
-            print(image_path)
+        image = self.load_image(image_path)
 
         if self.processor:
             image, question_str, answer_str = self.processor(image, question_str, answer_str)
 
         return image, question_str, answer_str
+
+    def load_image(self, image_path):
+        return Image.open(image_path).convert('RGB')
 
     @property
     def pad_idx(self):
@@ -48,37 +346,57 @@ class CLEVRSplit:
         return len(self.questions)
 
     @classmethod
-    def build_splits(cls, base_path):
+    def build_splits(cls, config):
         train_split = 'trainA'
         val_split = 'valA'
         test_split = 'valB'
         processor = None
 
         for split in [train_split, val_split, test_split]:
-            questions_path = f'{base_path}/questions/CLEVR_{split}_questions.json'
-            images_dir = f'{base_path}/images/{split}'
+            questions_path = f'{config.base_path}/questions/CLEVR_{split}_questions.json'
+            images_dir = f'{config.base_path}/images/{split}'
 
             if processor:
                 yield cls(questions_path, images_dir, processor=processor)
             else:
                 dataset = cls(questions_path, images_dir)
 
-                image_transform = Compose([ToTensor(), Normalize(0.5, 1)])
-                processor = CLEVRProcessor(dataset, image_transform=image_transform)
+                image_transform = [ToTensor()]
+                if not config.not_normalize_image:
+                    image_transform.append(Normalize(0.5, 1))
+                image_transform = Compose(image_transform)
+                processor = CLEVRProcessor(dataset, config, image_transform=image_transform)
                 dataset.processor = processor
 
                 yield dataset
 
 
 class CLEVRProcessor:
-    def __init__(self, dataset, image_transform=None, pad_questions=True, max_question_size=45):
+    def __init__(self, dataset, config, image_transform=None, pad_questions=True, max_question_size=45):
         self.cls_token = '[CLS]'
         self.pad_token = '[PAD]'
-        self.vocabulary, self.inv_vocabulary = self.build_vocabulary(dataset)
+        self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
         self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
         self.image_transform = image_transform
         self.pad_questions = pad_questions
         self.max_question_size = max_question_size
+
+
+    def load_or_build_vocabulary(self, config, dataset):
+        if os.path.exists(config.vocabulary_path):
+            print('Loading Vocabulary')
+            return self.load_vocabulary(config.vocabulary_path)
+        else:
+            print('Building Vocabulary')
+            return self.build_vocabulary(dataset)
+
+    def load_vocabulary(self, vocabulary_path):
+        with open(vocabulary_path) as fp:
+            vocabulary = list(map(str.strip, fp.readlines()))
+
+        vocabulary = dict(zip(vocabulary, range(len(vocabulary))))
+        inv_vocabulary = dict(enumerate(vocabulary))
+        return vocabulary, inv_vocabulary
 
     def build_vocabulary(self, dataset):
         vocabulary = []
@@ -116,12 +434,9 @@ class CLEVRProcessor:
     def __call__(self, *clevr_sample):
         image, question_str, answer_str = clevr_sample
 
-        tokenized_question = [self.vocabulary[w] for w in question_str.split()]
-        tokenized_question = [self.vocabulary[self.cls_token]] + tokenized_question
-        if self.pad_questions:
-            tokenized_question = self.pad_question(tokenized_question)
-
-        tokenized_question = torch.tensor(tokenized_question)
+        tokenized_question = self.tokenize_sequence(
+            question_str, self.max_question_size, self.pad_questions)
+        tokenized_question = torch.tensor(tokenized_question).long()
 
         answer_idx = self.answers_index[answer_str]
 
@@ -129,6 +444,28 @@ class CLEVRProcessor:
             image = self.image_transform(image)
 
         return image, tokenized_question, answer_idx
+
+    def tokenize_sequence(self, str_seq, max_seq_size, pad_seq, lower=True):
+        tokenized_seq = [self.vocabulary[w] for w in self.tokenize(str_seq, lower=lower)]
+        tokenized_seq = [self.vocabulary[self.cls_token]] + tokenized_seq
+        if pad_seq:
+            tokenized_seq = self.pad_sequence(tokenized_seq, max_seq_size)
+        return tokenized_seq
+
+    def tokenize(self, str_, lower=True):
+        if lower:
+            str_ = str_.lower()
+        str_ = str_.replace(';', ' ;').replace('?', ' ?')
+        return str_.split()
+
+    def pad_sequence(self, sequence, max_sequence_size):
+        pads_to_use = max_sequence_size - len(sequence)
+        pads_to_use = max(pads_to_use, 0)
+
+        padded_sequence = sequence + pads_to_use*[self.vocabulary[self.pad_token]]
+        padded_sequence = padded_sequence[:max_sequence_size] # if question is longer than should be
+
+        return padded_sequence
 
 
 class CLEVRMultimodalSplit:
@@ -141,19 +478,24 @@ class CLEVRMultimodalSplit:
         with open(scenes_path, 'r') as fp:
             self.scenes = json.load(fp)['scenes']
 
-        self.indexed_scenes = {scene['image_index']: scene for scene in self.scenes}
+    def subset(self, indices):
+        subset =  CLEVRMultimodalSplit(
+            scenes_path=self.scenes_path, images_dir=self.images_dir, processor=self.processor)
+        subset.scenes = [subset.scenes[idx]for idx in indices]
+        return subset
 
-
-    def __getitem__(self, idx):
+    def retrieve_raw(self, idx):
         scene = self.scenes[idx]
 
         image_filename = scene['image_filename']
 
         image_path = f'{self.images_dir}/{image_filename}'
-        try:
-            image = Image.open(image_path).convert('RGB')
-        except OSError:
-            print(image_path)
+        image = Image.open(image_path).convert('RGB')
+
+        return image, scene
+
+    def __getitem__(self, idx):
+        image, scene = self.retrieve_raw(idx)
 
         image, scene_str = self.processor(image, scene)
 
@@ -163,12 +505,8 @@ class CLEVRMultimodalSplit:
     def pad_idx(self):
         return self.processor.vocabulary[self.processor.pad_token]
 
-    def iter_qa(self):
-        for question in self.questions:
-            yield question['question'], question['answer']
-
     def __len__(self):
-        return len(self.questions)
+        return len(self.scenes)
 
     @classmethod
     def build_splits(cls, config):
@@ -185,7 +523,140 @@ class CLEVRMultimodalSplit:
                 yield cls(scenes_path, images_dir, processor=processor)
             else:
                 dataset = cls(scenes_path, images_dir)
-                image_transform = Compose([ToTensor(), Normalize(0.5, 1)])
+                image_transform = [ToTensor(), Resize((224,224))]
+                if not config.not_normalize_image:
+                    image_transform.append(Normalize(0.5, 1))
+                image_transform = Compose(image_transform)
+                processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
+                dataset.processor = processor
+                yield dataset
+
+
+class CLEVRMultimodalFromFeaturesSplit:
+    def __init__(self, scenes_path, images_features_path, processor=None):
+        # self.questions_path = questions_path
+        self.scenes_path = scenes_path
+        self.images_features_path = images_features_path
+        self.processor = processor
+
+        with h5py.File(self.images_features_path) as ds:
+            self.image_name_to_idx = json.loads(ds["image_features"].attrs["image_name_to_idx"])
+
+        with open(scenes_path, 'r') as fp:
+            self.scenes = json.load(fp)['scenes']
+
+    def retrieve_raw(self, idx):
+        scene = self.scenes[idx]
+
+        image_filename = scene['image_filename']
+        image_features = self.read_features(image_filename)
+
+        return image_features, scene
+
+    def read_features(self, image_name):
+        with h5py.File(self.images_features_path) as ds:
+            idx = self.image_name_to_idx[image_name]
+            features = ds['image_features'][idx]
+        return features
+
+    def __getitem__(self, idx):
+        image, scene = self.retrieve_raw(idx)
+
+        image, scene_str = self.processor(image, scene)
+
+        return image, scene_str
+
+    @property
+    def pad_idx(self):
+        return self.processor.vocabulary[self.processor.pad_token]
+
+    def __len__(self):
+        return len(self.scenes)
+
+    @classmethod
+    def build_splits(cls, config):
+        train_split = 'trainA'
+        val_split = 'valA'
+        test_split = 'valB'
+        processor = None
+
+        for split in [train_split, val_split, test_split]:
+            embedding_type = 'vit' if config.use_vit_embedding_loaded else config.use_embedding_loaded
+            scenes_path = f'{config.base_path}/scenes/CLEVR_{split}_scenes.json'
+            features_path = f'{config.base_path}/images/{split}-{embedding_type}.h5'
+
+            if processor:
+                yield cls(scenes_path, features_path, processor=processor)
+            else:
+                dataset = cls(scenes_path, features_path)
+                image_transform = torch.from_numpy
+                processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
+                dataset.processor = processor
+                yield dataset
+
+
+class CLEVRMultimodalTrainingSplit:
+    def __init__(self, scenes_path, questions_path, images_dir, processor=None):
+        # self.questions_path = questions_path
+        self.scenes_path = scenes_path
+        self.images_dir = images_dir
+        self.processor = processor
+
+        with open(scenes_path, 'r') as fp:
+            self.scenes = json.load(fp)['scenes']
+
+        self.indexed_scenes = {scene['image_index']: scene for scene in self.scenes}
+
+        with open(questions_path, 'r') as fp:
+            self.questions = json.load(fp)['questions']
+
+    def retrieve_raw(self, idx):
+        question = self.questions[idx]
+        image_idx = question['image_index']
+        scene = self.indexed_scenes[image_idx]
+
+        image_filename = scene['image_filename']
+
+        image_path = f'{self.images_dir}/{image_filename}'
+        image = Image.open(image_path).convert('RGB')
+
+        return image, scene, question
+
+    def __getitem__(self, idx):
+        image, scene, question = self.retrieve_raw(idx)
+        return self.processor(image, scene, question)
+
+    @property
+    def pad_idx(self):
+        return self.processor.vocabulary[self.processor.pad_token]
+
+    def __len__(self):
+        return len(self.scenes)
+
+    def iter_qa(self):
+        for question in self.questions:
+            yield question['question'], question['answer']
+
+    @classmethod
+    def build_splits(cls, config):
+        train_split = 'trainA'
+        val_split = 'valA'
+        test_split = 'valB'
+        processor = None
+
+        for split in [train_split, val_split, test_split]:
+            scenes_path = f'{config.base_path}/scenes/CLEVR_{split}_scenes.json'
+            questions_path = f'{config.base_path}/questions/CLEVR_{split}_questions.json'
+            images_dir = f'{config.base_path}/images/{split}'
+
+            if processor:
+                yield cls(scenes_path, questions_path, images_dir, processor=processor)
+            else:
+                dataset = cls(scenes_path, questions_path, images_dir)
+                image_transform = [ToTensor(), Resize((224,224))]
+                if not config.not_normalize_image:
+                    image_transform.append(Normalize(0.5, 1))
+                image_transform = Compose(image_transform)
                 processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
                 dataset.processor = processor
                 yield dataset
@@ -197,19 +668,67 @@ class CLEVRMultimodalProcessor:
                  config,
                  image_transform=None,
                  pad_scenes=True,
+                 pad_questions=True,
                 ):
-
-        self.cls_token = '[CLS]'
-        self.pad_token = '[PAD]'
-        self.image_transform = image_transform
-        self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
         self.pad_scenes = pad_scenes
+        self.pad_questions = pad_questions
         self.max_scene_size = config.max_scene_size
+        self.max_question_size = config.max_question_size
         self.rels_to_sample = config.rels_to_sample
         self.only_front_right_relations = config.only_front_right_relations
         self.filter_symmetric_relations = config.filter_symmetric_relations
         self.display_object_properties = config.display_object_properties
         self.shuffle_object_identities = config.shuffle_object_identities
+
+        self.token_translations = self.load_token_translations(config)
+
+        self.cls_token = '[CLS]'
+        self.pad_token = '[PAD]'
+        self.mask_token = '[MASK]'
+        # self.special_tokens = ['[CLS]', '[PAD]', '[SEP]', '[MASK]']
+        self.special_tokens = ['[CLS]', '[PAD]', '[SEP]', '[MASK]'] + [f'[O{i}]' for i in range(10)]
+        self.image_transform = image_transform
+
+        self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
+        # if self.token_translations:
+        #     self.vocabulary, self.inv_vocabulary = self.adjust_vocab_to_token_translations(self.vocabulary)
+
+        self.non_special_tokens = [t for t in self.vocabulary if t not in self.special_tokens]
+        self.special_token_idxs = [self.to_token_idx(t) for t in self.special_tokens]
+        self.non_special_token_idxs = [self.to_token_idx(t) for t in self.non_special_tokens]
+        self.cls_token_idx = self.to_token_idx(self.cls_token)
+        self.pad_token_idx = self.to_token_idx(self.pad_token)
+        self.mask_token_idx = self.to_token_idx(self.mask_token)
+
+        if config.multimodal_training:
+            self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
+
+    def load_token_translations(self, config):
+        if not config.token_translation_path:
+            return None
+        with open(config.token_translation_path) as fp:
+            return json.load(fp)
+
+    def adjust_prevocab_to_token_translations(self, vocabulary):
+        original_size = len(vocabulary)
+        unique_vocab = set(self.token_translations.get(t, t) for t in vocabulary)
+        vocabulary = [t for t in vocabulary if t in unique_vocab]
+        end_size = len(vocabulary)
+        print(f'Adapting vocab from {original_size} to {end_size}')
+        # vocabulary = {t: i for t, i in vocabulary.items() if t in unique_vocab}
+        # inv_vocabulary = dict(enumerate(vocabulary))
+        return vocabulary#, inv_vocabulary
+
+    def build_answers_index(self, dataset):
+        answers_index = []
+        print('Building answers index')
+        for _, answer_str in tqdm(dataset.iter_qa(), total=len(dataset)):
+            answers_index.extend(answer_str.split())
+
+        answers_index = sorted(list(set(answers_index)))
+        answers_index = dict(zip(answers_index, range(len(answers_index))))
+        inv_answers_index = dict(enumerate(answers_index))
+        return answers_index, inv_answers_index
 
     def load_or_build_vocabulary(self, config, dataset):
         if os.path.exists(config.vocabulary_path):
@@ -220,6 +739,9 @@ class CLEVRMultimodalProcessor:
     def load_vocabulary(self, vocabulary_path):
         with open(vocabulary_path) as fp:
             vocabulary = list(map(str.strip, fp.readlines()))
+
+        if self.token_translations:
+            vocabulary = self.adjust_prevocab_to_token_translations(vocabulary)
 
         vocabulary = dict(zip(vocabulary, range(len(vocabulary))))
         inv_vocabulary = dict(enumerate(vocabulary))
@@ -243,7 +765,7 @@ class CLEVRMultimodalProcessor:
         inv_vocabulary = dict(enumerate(vocabulary))
         return vocabulary, inv_vocabulary
 
-    def __call__(self, image, scene):
+    def __call__(self, image, scene, question=None):
         scene_str = Scene.from_dict(scene,
                                     shuffle_relations=True,
                                     relations_to_sample=self.rels_to_sample,
@@ -256,16 +778,35 @@ class CLEVRMultimodalProcessor:
         tokenized_scene = self.tokenize_sequence(
             scene_str, self.max_scene_size, self.pad_scenes, lower=False)
 
-        tokenized_scene = torch.tensor(tokenized_scene)
+        tokenized_scene = torch.tensor(tokenized_scene).long()
 
         if self.image_transform:
             image = self.image_transform(image)
 
-        return image, tokenized_scene
+        # If multimodal_pretraining
+        if question is None:
+            return image, tokenized_scene
+
+        # If multimodal_training
+        question_str = question['question']
+        answer_str = question['answer']
+
+        tokenized_question = self.tokenize_sequence(
+            question_str, self.max_question_size, self.pad_questions)
+        tokenized_question = torch.tensor(tokenized_question).long()
+
+        answer_idx = self.answers_index[answer_str]
+
+        return image, tokenized_scene, tokenized_question, answer_idx
+
+    def to_token_idx(self, word):
+        if self.token_translations:
+            word = self.token_translations.get(word, word)
+        return self.vocabulary[word]
 
     def tokenize_sequence(self, str_seq, max_seq_size, pad_seq, lower=True):
-        tokenized_seq = [self.vocabulary[w] for w in self.tokenize(str_seq, lower=lower)]
-        tokenized_seq = [self.vocabulary[self.cls_token]] + tokenized_seq
+        tokenized_seq = [self.to_token_idx(w) for w in self.tokenize(str_seq, lower=lower)]
+        tokenized_seq = [self.to_token_idx(self.cls_token)] + tokenized_seq
         if pad_seq:
             tokenized_seq = self.pad_sequence(tokenized_seq, max_seq_size)
         return tokenized_seq
@@ -280,7 +821,7 @@ class CLEVRMultimodalProcessor:
         pads_to_use = max_sequence_size - len(sequence)
         pads_to_use = max(pads_to_use, 0)
 
-        padded_sequence = sequence + pads_to_use*[self.vocabulary[self.pad_token]]
+        padded_sequence = sequence + pads_to_use*[self.to_token_idx(self.pad_token)]
         padded_sequence = padded_sequence[:max_sequence_size] # if question is longer than should be
 
         return padded_sequence
@@ -515,8 +1056,8 @@ class CLEVRTextProcessor:
         # if self.pad_questions:
         #     tokenized_question = self.pad_sequence(tokenized_question, self.max_question_size)
 
-        tokenized_scene = torch.tensor(tokenized_scene)
-        tokenized_question = torch.tensor(tokenized_question)
+        tokenized_scene = torch.tensor(tokenized_scene).long()
+        tokenized_question = torch.tensor(tokenized_question).long()
 
         answer_idx = self.answers_index[answer_str]
 
@@ -665,7 +1206,7 @@ class Scene:
             random.shuffle(processed_relations)
         if self.filter_symmetric:
             processed_relations = list(set(processed_relations))
-        if self.relations_to_sample and (self.relations_to_sample < len(processed_relations)):
+        if self.relations_to_sample >=0 and (self.relations_to_sample < len(processed_relations)):
             processed_relations = random.sample(processed_relations, self.relations_to_sample)
         if self.shuffle_relations:
             random.shuffle(processed_relations)
@@ -741,3 +1282,54 @@ class SceneRelation:
 
     def __repr__(self) -> str:
         return f'[O{self.object_id}] {self.relation_type} [O{self.subject_id}]'
+
+
+ALL_POSSIBLE_COLORS = [
+    'gray', # old
+    'alice-blue','antique-white','aqua','aqua-marine','azure','beige','bisque','black',
+    'blanched-almond','blue','blue-violet','brown','burly-wood','cadet-blue','chartreuse',
+    'chocolate','coral','corn-flower-blue','corn-silk','crimson','cyan','dark-blue','dark-cyan',
+    'dark-golden-rod','dark-green','dark-grey','dark-khaki','dark-magenta','dark-olive-green',
+    'dark-orange','dark-orchid','dark-red','dark-salmon','dark-sea-green','dark-slate-blue',
+    'dark-slate-gray','dark-turquoise','dark-violet','deep-pink','deep-sky-blue','dim-grey',
+    'dodger-blue','firebrick','floral-white','forest-green','gainsboro','ghost-white','gold',
+    'golden-rod','green','green-yellow','grey','honeydew','hot-pink','indian-red','indigo',
+    'ivory','khaki','lavender','lavender-blush','lawn-green','lemon-chiffon','light-blue',
+    'light-coral','light-cyan','light-golden-rod-yellow','light-green','light-grey','light-pink',
+    'light-salmon','light-sea-green','light-sky-blue','light-slate-gray','light-steel-blue',
+    'light-yellow','lime','lime-green','linen','magenta-','maroon','medium-aqua-marine',
+    'medium-blue','medium-orchid','medium-purple','medium-sea-green','medium-slate-blue',
+    'medium-spring-green','medium-turquoise','medium-violet-red','midnight-blue','mint-cream',
+    'misty-rose','moccasin','navajo-white','navy','old-lace','olive','olive-drab','orange',
+    'orange-red','orchid','pale-golden-rod','pale-green','pale-turquoise','pale-violet-red',
+    'papaya-whip','peach-puff','peru','pink','plum','powder-blue','purple','red','rosy-brown',
+    'royal-blue','saddle-brown','salmon','sandy-brown','sea-green','sea-shell','sienna','silver',
+    'sky-blue','slate-blue','slate-gray','snow','spring-green','steel-blue','tan','teal','thistle',
+    'tomato','turquoise','violet','wheat','white','white-smoke','yellow','yellow-green',
+
+
+    '#000000', '#00002d', '#000059', '#000086', '#0000b2', '#0000df', '#002d00', '#002d2d', '#002d59', 
+    '#002d86', '#002db2', '#002ddf', '#005900', '#00592d', '#005959', '#005986', '#0059b2', '#0059df', 
+    '#008600', '#00862d', '#008659', '#008686', '#0086b2', '#0086df', '#00b200', '#00b22d', '#00b259', 
+    '#00b286', '#00b2b2', '#00b2df', '#00df00', '#00df2d', '#00df59', '#00df86', '#00dfb2', '#00dfdf', 
+    '#2d0000', '#2d002d', '#2d0059', '#2d0086', '#2d00b2', '#2d00df', '#2d2d00', '#2d2d2d', '#2d2d59', 
+    '#2d2d86', '#2d2db2', '#2d2ddf', '#2d5900', '#2d592d', '#2d5959', '#2d5986', '#2d59b2', '#2d59df', 
+    '#2d8600', '#2d862d', '#2d8659', '#2d8686', '#2d86b2', '#2d86df', '#2db200', '#2db22d', '#2db259', 
+    '#2db286', '#2db2b2', '#2db2df', '#2ddf00', '#2ddf2d', '#2ddf59', '#2ddf86', '#2ddfb2', '#2ddfdf', 
+    '#590000', '#59002d', '#590059', '#590086', '#5900b2', '#5900df', '#592d00', '#592d2d', '#592d59', 
+    '#592d86', '#592db2', '#592ddf', '#595900', '#59592d', '#595959', '#595986', '#5959b2', '#5959df', 
+    '#598600', '#59862d', '#598659', '#598686', '#5986b2', '#5986df', '#59b200', '#59b22d', '#59b259', 
+    '#59b286', '#59b2b2', '#59b2df', '#59df00', '#59df2d', '#59df59', '#59df86', '#59dfb2', '#59dfdf', 
+    '#860000', '#86002d', '#860059', '#860086', '#8600b2', '#8600df', '#862d00', '#862d2d', '#862d59', 
+    '#862d86', '#862db2', '#862ddf', '#865900', '#86592d', '#865959', '#865986', '#8659b2', '#8659df', 
+    '#868600', '#86862d', '#868659', '#868686', '#8686b2', '#8686df', '#86b200', '#86b22d', '#86b259', 
+    '#86b286', '#86b2b2', '#86b2df', '#86df00', '#86df2d', '#86df59', '#86df86', '#86dfb2', '#86dfdf', 
+    '#b20000', '#b2002d', '#b20059', '#b20086', '#b200b2', '#b200df', '#b22d00', '#b22d2d', '#b22d59', 
+    '#b22d86', '#b22db2', '#b22ddf', '#b25900', '#b2592d', '#b25959', '#b25986', '#b259b2', '#b259df', 
+    '#b28600', '#b2862d', '#b28659', '#b28686', '#b286b2', '#b286df', '#b2b200', '#b2b22d', '#b2b259', 
+    '#b2b286', '#b2b2b2', '#b2b2df', '#b2df00', '#b2df2d', '#b2df59', '#b2df86', '#b2dfb2', '#b2dfdf', 
+    '#df0000', '#df002d', '#df0059', '#df0086', '#df00b2', '#df00df', '#df2d00', '#df2d2d', '#df2d59', 
+    '#df2d86', '#df2db2', '#df2ddf', '#df5900', '#df592d', '#df5959', '#df5986', '#df59b2', '#df59df', 
+    '#df8600', '#df862d', '#df8659', '#df8686', '#df86b2', '#df86df', '#dfb200', '#dfb22d', '#dfb259', 
+    '#dfb286', '#dfb2b2', '#dfb2df', '#dfdf00', '#dfdf2d', '#dfdf59', '#dfdf86', '#dfdfb2', '#dfdfdf',
+]
