@@ -1,7 +1,7 @@
 import random
 
 import torch
-torch.fx.wrap('len')
+# torch.fx.wrap('len')
 from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -160,6 +160,8 @@ class MultimodalPretrainingModel(L.LightningModule):
         masked = labels != -100
         correct = pred.eq(labels.view_as(pred))[masked].sum().item()
         count = torch.ones_like(pred)[masked].sum().item()
+        if not count:
+            return 0.0
         return (correct / count)
 
     def calc_accuracy_at_perc(self, output, labels, percentage=0.1):
@@ -172,6 +174,8 @@ class MultimodalPretrainingModel(L.LightningModule):
 
         correct = (pred_sorted[:,:topk] == masked_labels.unsqueeze(-1)).any(-1).sum().item()
         count = torch.ones_like(masked_labels).sum().item()
+        if not count:
+            return 0.0
         return correct / count
 
     def calc_rank(self, output, labels):
@@ -215,17 +219,14 @@ class MultimodalPretrainingModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         dl_name = ['val', 'systematic_val',
-                   'color_val', 'color_systematic_val',
-                   'shape_val', 'shape_systematic_val'][dataloader_idx]
+                   'color_val', 'color_systematic_val', 
+                   'shape_val', 'shape_systematic_val', 
+                   'color_common_systematic_val', 'shape_common_systematic_val'][dataloader_idx]
         images, scenes, labels = batch
 
         output = self.inner_model(images, scenes)
         loss = F.cross_entropy(output.transpose(1,2), labels)
 
-        # pred = output.argmax(dim=-1, keepdim=True)  # get the index of the max log-probability
-        # masked = labels != -100
-        # correct = pred.eq(labels.view_as(pred))[masked].sum().detach()
-        # count = torch.ones_like(pred)[masked].sum().detach()
         acc = self.calc_accuracy(output, labels)
         mr, mrr = self.calc_rank(output, labels)
         gt_prob, rel_gt_prob = self.calc_prob_metrics(output, labels)
@@ -242,7 +243,8 @@ class MultimodalPretrainingModel(L.LightningModule):
     def test_step(self, batch, batch_idx, dataloader_idx):
         dl_name = ['test', 'systematic_test',
                    'color_test', 'color_systematic_test',
-                   'shape_test', 'shape_systematic_test'][dataloader_idx]
+                   'shape_test', 'shape_systematic_test',
+                   'color_common_systematic_test', 'shape_common_systematic_test'][dataloader_idx]
         images, scenes, labels = batch
         output = self.inner_model(images, scenes)
         loss = F.cross_entropy(output.transpose(1,2), labels)
@@ -468,11 +470,7 @@ class MultimodalModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.aug_zero = config.aug_zero
-        self.aug_zero_independent = config.aug_zero_independent
-        n_input_tokens = config.n_tokens * (1 + self.aug_zero)
-
-        self.word_embedding = nn.Embedding(n_input_tokens, config.d_hidden)
+        self.word_embedding = nn.Embedding(config.n_tokens, config.d_hidden)
         if config.use_vit_embedding:
             vit_emb_size = 768
             vit_embedding = ViTEmbedding()
@@ -510,13 +508,7 @@ class MultimodalModel(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=config.d_hidden, nhead=config.n_head, norm_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, config.n_layers, norm=nn.LayerNorm(config.d_hidden))
-
-        # if config.multimodal_training:
-        #     self.type_question_embedding = nn.Parameter(torch.randn(1, 1, config.d_hidden))
-        #     self.classifier = nn.Linear(config.d_hidden, config.n_outputs)
-        # else:
-        # self.classifier = nn.Linear(config.d_hidden, config.n_tokens)
-        self.classifier = nn.Linear(config.d_hidden, n_input_tokens)
+        self.classifier = nn.Linear(config.d_hidden, config.n_tokens)
 
     def train(self, mode=True):
         self = super().train(mode=mode)
@@ -526,15 +518,7 @@ class MultimodalModel(nn.Module):
         return self
 
     def forward(self, image, scene, question=None):
-        if self.training and self.aug_zero:
-            if self.aug_zero_independent:
-                aug_zero_offset = torch.randint_like(scene, 0, self.aug_zero) * self.config.n_tokens
-            else:
-                aug_zero_offset = random.randint(0, self.aug_zero) * self.config.n_tokens
-        else:
-            aug_zero_offset = 0
-
-        embedded_scene = self.word_embedding(scene + aug_zero_offset).transpose(1,0)
+        embedded_scene = self.word_embedding(scene).transpose(1,0)
         embedded_image = self.patch_embedding(image).transpose(1,0)
 
         embedded_scene = embedded_scene + self.type_scene_embedding
@@ -545,25 +529,16 @@ class MultimodalModel(nn.Module):
         s_pad_mask = scene == self.config.pad_idx
         pad_mask = [i_pad_mask, s_pad_mask]
 
-        # if question is not None and self.config.multimodal_training:
-        #     embedded_question = self.word_embedding(question + aug_zero_offset_question).transpose(1,0)
-        #     embedded_question = embedded_question + self.type_question_embedding
-        #     q_pad_mask = question == self.config.pad_idx
-        #     pad_mask.append(q_pad_mask)
-        #     combined_embedding.append(embedded_question)
-
         pad_mask = torch.cat(pad_mask, dim=1)
         combined_embedding = torch.cat(combined_embedding)
 
         transformer_input = combined_embedding + self.pos_embedding
         transformer_output = self.transformer(transformer_input, src_key_padding_mask=pad_mask)
-        # if self.config.multimodal_training:
-        #     return self.classifier(transformer_output[0,:,:])
-        # else:
+
         output_logits = self.classifier(transformer_output).transpose(1,0)
-        if not self.training and self.aug_zero and self.aug_zero_independent:
-            n, t, *_ = output_logits.shape
-            output_logits.reshape(n, t, self.aug_zero+1, self.config.n_tokens).sum(-2)
+        # if not self.training and self.aug_zero and self.aug_zero_independent:
+        #     n, t, *_ = output_logits.shape
+        #     output_logits.reshape(n, t, self.aug_zero+1, self.config.n_tokens).sum(-2)
 
         return output_logits
 

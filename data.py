@@ -71,6 +71,14 @@ def build_detailed_test_dataloaders(dataset, config, type_of_tokens_to_test=None
             for k, collate_fn in collators_for_testing.items()}
 
 
+class RandomPixelShuffle(object):
+    def __call__(self, img):
+        channels, height, width = img.size()
+        indices = np.random.permutation(height * width)
+        shuffled_img = img.view(channels, -1)[:, indices].view(channels, height, width)
+        return shuffled_img
+
+
 class CollatorForMaskedLanguageModeling:
     def __init__(self, config, processor, mlm_probability=0.15):
         self.config = config
@@ -125,12 +133,14 @@ class CollatorForMaskedLanguageModeling:
 
 
 class CollatorForMaskedSelectedTokens:
-    def __init__(self, config, processor, tokens):
+    def __init__(self, config, processor, tokens, dont_mask_spheres=False):
         self.config = config
         self.token_to_mask_idxs = torch.tensor(tokens).long()
         self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
         self.mask_token_idx = processor.mask_token_idx
         self.image_patch_sizes = config.patch_height, config.patch_width
+        self.dont_mask_spheres = dont_mask_spheres
+        self.sphere_token_idx = processor.vocabulary['sphere']
 
     def __call__(self, batch):
         images, scenes = default_collate(batch)
@@ -147,6 +157,14 @@ class CollatorForMaskedSelectedTokens:
     def build_targets(self, inputs):
         labels = inputs.clone()
         masked_indices = torch.isin(labels, self.token_to_mask_idxs)
+        if self.dont_mask_spheres:
+            sphere_token_mask = inputs == self.sphere_token_idx
+            sphere_mask = (torch.roll(sphere_token_mask, shifts=-3, dims=1) |
+                           torch.roll(sphere_token_mask, shifts=-2, dims=1) |
+                           torch.roll(sphere_token_mask, shifts=-1, dims=1) |
+                           sphere_token_mask)
+            masked_indices = masked_indices & ~sphere_mask
+            
         labels[~masked_indices] = -100
         inputs[masked_indices] = self.mask_token_idx
 
@@ -154,13 +172,15 @@ class CollatorForMaskedSelectedTokens:
 
 
 class CollatorForMaskedRandomSelectedTokens:
-    def __init__(self, config, processor, tokens, p):
+    def __init__(self, config, processor, tokens, p, dont_mask_spheres=False):
         self.config = config
         self.token_to_mask_idxs = torch.tensor(tokens).long()
         self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
         self.mask_token_idx = processor.mask_token_idx
         self.image_patch_sizes = config.patch_height, config.patch_width
         self.p = p
+        self.dont_mask_spheres = dont_mask_spheres
+        self.sphere_token_idx = processor.vocabulary['sphere']
 
     def __call__(self, batch):
         images, scenes = default_collate(batch)
@@ -179,6 +199,14 @@ class CollatorForMaskedRandomSelectedTokens:
         masked_indices = torch.isin(labels, self.token_to_mask_idxs)
         is_selected = torch.bernoulli(torch.full_like(labels, self.p, dtype=torch.float)).bool()
         masked_indices = masked_indices & is_selected
+        if self.dont_mask_spheres:
+            sphere_token_mask = inputs == self.sphere_token_idx
+            sphere_mask = (torch.roll(sphere_token_mask, shifts=-3, dims=1) |
+                           torch.roll(sphere_token_mask, shifts=-2, dims=1) |
+                           torch.roll(sphere_token_mask, shifts=-1, dims=1) |
+                           sphere_token_mask)
+            masked_indices = masked_indices & ~sphere_mask
+            
         labels[~masked_indices] = -100
         inputs[masked_indices] = self.mask_token_idx
 
@@ -211,7 +239,75 @@ class IdentityCollator:
         return inputs, labels
 
 
+def build_common_colors_subset(dataset, config):
+    with open(config.base_path + f'/CoGenT_A.json') as fp:
+        color_dist = json.load(fp)
+
+    common_colors = set(color_dist['cube']) & set(color_dist['cylinder'])
+    cmn_colors_in_image = np.array([
+        np.mean([o['color'] in common_colors for o in scene['objects']])
+        for scene in dataset.scenes
+    ])
+
+    # CUTS = [0.6, 0.5, 0.4, 0.3, 0.2, 0.1, -0.00001]
+    CUTS = [0.9,0.8,0.7,0.6,0.5,0.4,0.3,0.2,0.1,-0.0]
+
+    subsets = []
+    for cut in CUTS:
+        indices = np.argwhere(cmn_colors_in_image >= cut)[:,0].tolist()
+        subsets.append(Subset(dataset, indices))
+        
+    return subsets
+
+
+class CurriculumData:
+    def __init__(self, train_subsets):
+        super().__init__()
+        self.step = 0
+        self.train_subsets = train_subsets
+
+    @property 
+    def processor(self):
+        return self.current_subset.dataset.processor
+        
+    @property 
+    def n_steps(self):
+        return len(self.train_subsets)
+
+    @property 
+    def current_subset(self):
+        return self.train_subsets[self.step]
+
+    def __len__(self):
+        return len(self.current_subset)
+
+    def __getitem__(self, idx):
+        return self.current_subset[idx]
+
+
 class CurriculumScheduler(L.Callback):
+    def __init__(self, curriculum: CurriculumData, max_epochs: int):
+        self.curriculum = curriculum
+        self.max_epochs = max_epochs
+
+        n_steps = self.curriculum.n_steps # uniform segments
+        self.intervals = [(s[0],s[-1]+1) for s in np.array_split(range(self.max_epochs+1), n_steps)]
+
+    def _prepare_epoch(self, trainer, model, epoch):
+        current_step = [
+            step for step, interval in enumerate(self.intervals) if epoch in range(*interval)][0]
+        self.curriculum.step = current_step
+
+    def setup(self, trainer, model, stage):
+        # print('CurriculumScheduler.setup')
+        self._prepare_epoch(trainer, model, 0)
+
+    def on_train_epoch_end(self, trainer, model):
+        # print('CurriculumScheduler.on_train_epoch_end')
+        self._prepare_epoch(trainer, model, trainer.current_epoch+1)
+
+
+class NObjectsCurriculumScheduler(L.Callback):
     def __init__(self, schedule: list, max_epochs: int):
         self.schedule = schedule
         self.max_epochs = max_epochs
@@ -232,9 +328,9 @@ class CurriculumScheduler(L.Callback):
     def on_train_epoch_end(self, trainer, model):
         # print('CurriculumScheduler.on_train_epoch_end')
         self._prepare_epoch(trainer, model, trainer.current_epoch + 1)
-
-
-class CurriculumData(L.LightningDataModule):
+ 
+      
+class NObjectsCurriculumData(L.LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -505,6 +601,10 @@ class CLEVRMultimodalSplit:
     def pad_idx(self):
         return self.processor.vocabulary[self.processor.pad_token]
 
+    @property
+    def n_tokens(self):
+        return self.processor.n_tokens
+
     def __len__(self):
         return len(self.scenes)
 
@@ -513,9 +613,11 @@ class CLEVRMultimodalSplit:
         train_split = 'trainA'
         val_split = 'valA'
         test_split = 'valB'
+        # common_test_split = 'valB'
+        common_test_split = 'valC'
         processor = None
 
-        for split in [train_split, val_split, test_split]:
+        for split in [train_split, val_split, test_split, common_test_split]:
             scenes_path = f'{config.base_path}/scenes/CLEVR_{split}_scenes.json'
             images_dir = f'{config.base_path}/images/{split}'
 
@@ -526,6 +628,8 @@ class CLEVRMultimodalSplit:
                 image_transform = [ToTensor(), Resize((224,224))]
                 if not config.not_normalize_image:
                     image_transform.append(Normalize(0.5, 1))
+                if config.permute_pixels:
+                    image_transform.append(RandomPixelShuffle())
                 image_transform = Compose(image_transform)
                 processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
                 dataset.processor = processor
@@ -680,6 +784,11 @@ class CLEVRMultimodalProcessor:
         self.display_object_properties = config.display_object_properties
         self.shuffle_object_identities = config.shuffle_object_identities
 
+
+        self.aug_zero = max(config.aug_zero, 1) # older experiment used 0 as base
+        self.aug_zero_independent = config.aug_zero_independent
+        self.aug_zero_color = config.aug_zero_color
+
         self.token_translations = self.load_token_translations(config)
 
         self.cls_token = '[CLS]'
@@ -690,15 +799,22 @@ class CLEVRMultimodalProcessor:
         self.image_transform = image_transform
 
         self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
+        self.base_n_tokens = len(self.vocabulary)
         # if self.token_translations:
         #     self.vocabulary, self.inv_vocabulary = self.adjust_vocab_to_token_translations(self.vocabulary)
 
         self.non_special_tokens = [t for t in self.vocabulary if t not in self.special_tokens]
         self.special_token_idxs = [self.to_token_idx(t) for t in self.special_tokens]
+        self.special_token_idxs_t = torch.tensor(self.special_token_idxs)
         self.non_special_token_idxs = [self.to_token_idx(t) for t in self.non_special_tokens]
+        self.non_special_token_idxs_t = torch.tensor(self.non_special_token_idxs)
         self.cls_token_idx = self.to_token_idx(self.cls_token)
         self.pad_token_idx = self.to_token_idx(self.pad_token)
         self.mask_token_idx = self.to_token_idx(self.mask_token)
+        self.color_token_idxs = [self.to_token_idx(t) for t in self.vocabulary if t in ALL_POSSIBLE_COLORS]
+        self.min_color_idx = min(self.color_token_idxs)
+        self.color_token_idxs_t = torch.tensor(self.color_token_idxs)
+        self.n_color_tokens = len(self.color_token_idxs)
 
         if config.multimodal_training:
             self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
@@ -766,6 +882,23 @@ class CLEVRMultimodalProcessor:
         return vocabulary, inv_vocabulary
 
     def __call__(self, image, scene, question=None):
+        tokenized_scene = self.process_scene(scene)
+        image = self.process_image(image)
+        # If multimodal_pretraining
+        if question is None:
+            return image, tokenized_scene
+
+        # If multimodal_training
+        tokenized_question = self.process_question(question)
+        answer_idx = self.process_answer(question)
+        return image, tokenized_scene, tokenized_question, answer_idx
+
+    def process_image(self, image):
+        if self.image_transform:
+            image = self.image_transform(image)
+        return image
+            
+    def process_scene(self, scene):
         scene_str = Scene.from_dict(scene,
                                     shuffle_relations=True,
                                     relations_to_sample=self.rels_to_sample,
@@ -774,30 +907,58 @@ class CLEVRMultimodalProcessor:
                                     always_display_properties=self.display_object_properties,
                                     shuffle_object_identities=self.shuffle_object_identities)
         scene_str = str(scene_str)
-
         tokenized_scene = self.tokenize_sequence(
             scene_str, self.max_scene_size, self.pad_scenes, lower=False)
-
         tokenized_scene = torch.tensor(tokenized_scene).long()
+        if self.aug_zero > 1:
+            tokenized_scene = self.virtual_augment_scene(tokenized_scene)    
+        
+        return tokenized_scene
+    
+    @property
+    def n_tokens(self):
+        if self.aug_zero_color:
+            return self.base_n_tokens + (self.aug_zero-1)*self.n_color_tokens
+        return self.aug_zero*self.base_n_tokens
+    
+    def virtual_augment_scene(self, tokenized_scene):
+        if self.aug_zero_color:
+            tokens_not_to_augment = torch.isin(tokenized_scene, self.special_token_idxs_t)
+            tokens_not_to_augment = tokens_not_to_augment | ~torch.isin(tokenized_scene, self.color_token_idxs_t)
+        else:
+            tokens_not_to_augment = torch.isin(tokenized_scene, self.special_token_idxs_t)
 
-        if self.image_transform:
-            image = self.image_transform(image)
-
-        # If multimodal_pretraining
-        if question is None:
-            return image, tokenized_scene
-
-        # If multimodal_training
-        question_str = question['question']
+        if self.aug_zero_independent:
+            aug_offset_vocab = torch.randint_like(tokenized_scene, 0, self.aug_zero)
+        else:
+            aug_offset_vocab = random.randint(0, self.aug_zero-1)
+        
+        if self.aug_zero_color:
+            new_vocab_start = self.base_n_tokens - self.min_color_idx
+            aug_offset = new_vocab_start + (aug_offset_vocab-1)*self.n_color_tokens
+            if self.aug_zero_independent:
+                aug_offset[aug_offset_vocab == 0] = 0  
+            else:
+                aug_offset = 0 if aug_offset_vocab == 0 else aug_offset
+        else:
+            aug_offset = self.base_n_tokens * aug_offset_vocab
+        
+        augmented_scene = tokenized_scene + aug_offset
+        augmented_scene[tokens_not_to_augment] = tokenized_scene[tokens_not_to_augment]
+        
+        return augmented_scene
+    
+    def process_answer(self, question):
         answer_str = question['answer']
+        answer_idx = self.answers_index[answer_str]
+        return answer_idx
 
+    def process_question(self, question):
+        question_str = question['question']
         tokenized_question = self.tokenize_sequence(
             question_str, self.max_question_size, self.pad_questions)
         tokenized_question = torch.tensor(tokenized_question).long()
-
-        answer_idx = self.answers_index[answer_str]
-
-        return image, tokenized_scene, tokenized_question, answer_idx
+        return tokenized_question
 
     def to_token_idx(self, word):
         if self.token_translations:
@@ -1220,7 +1381,8 @@ class Scene:
     def __str__(self):
         objects_str_list = []
         for object in self.objects:
-            objects_str_list.append(f'{object.identity_str()} {object.property_str()}')
+            objects_str_list.append(f'{object.property_str()}')
+            # objects_str_list.append(f'{object.identity_str()} {object.property_str()}')
         if self.shuffle_object_identities:
             random.shuffle(objects_str_list)
 
@@ -1284,7 +1446,7 @@ class SceneRelation:
         return f'[O{self.object_id}] {self.relation_type} [O{self.subject_id}]'
 
 
-ALL_POSSIBLE_COLORS = [
+ALL_POSSIBLE_COLORS = list({
     'gray', # old
     'alice-blue','antique-white','aqua','aqua-marine','azure','beige','bisque','black',
     'blanched-almond','blue','blue-violet','brown','burly-wood','cadet-blue','chartreuse',
@@ -1308,28 +1470,72 @@ ALL_POSSIBLE_COLORS = [
     'tomato','turquoise','violet','wheat','white','white-smoke','yellow','yellow-green',
 
 
-    '#000000', '#00002d', '#000059', '#000086', '#0000b2', '#0000df', '#002d00', '#002d2d', '#002d59', 
-    '#002d86', '#002db2', '#002ddf', '#005900', '#00592d', '#005959', '#005986', '#0059b2', '#0059df', 
-    '#008600', '#00862d', '#008659', '#008686', '#0086b2', '#0086df', '#00b200', '#00b22d', '#00b259', 
-    '#00b286', '#00b2b2', '#00b2df', '#00df00', '#00df2d', '#00df59', '#00df86', '#00dfb2', '#00dfdf', 
-    '#2d0000', '#2d002d', '#2d0059', '#2d0086', '#2d00b2', '#2d00df', '#2d2d00', '#2d2d2d', '#2d2d59', 
-    '#2d2d86', '#2d2db2', '#2d2ddf', '#2d5900', '#2d592d', '#2d5959', '#2d5986', '#2d59b2', '#2d59df', 
-    '#2d8600', '#2d862d', '#2d8659', '#2d8686', '#2d86b2', '#2d86df', '#2db200', '#2db22d', '#2db259', 
-    '#2db286', '#2db2b2', '#2db2df', '#2ddf00', '#2ddf2d', '#2ddf59', '#2ddf86', '#2ddfb2', '#2ddfdf', 
-    '#590000', '#59002d', '#590059', '#590086', '#5900b2', '#5900df', '#592d00', '#592d2d', '#592d59', 
-    '#592d86', '#592db2', '#592ddf', '#595900', '#59592d', '#595959', '#595986', '#5959b2', '#5959df', 
-    '#598600', '#59862d', '#598659', '#598686', '#5986b2', '#5986df', '#59b200', '#59b22d', '#59b259', 
-    '#59b286', '#59b2b2', '#59b2df', '#59df00', '#59df2d', '#59df59', '#59df86', '#59dfb2', '#59dfdf', 
-    '#860000', '#86002d', '#860059', '#860086', '#8600b2', '#8600df', '#862d00', '#862d2d', '#862d59', 
-    '#862d86', '#862db2', '#862ddf', '#865900', '#86592d', '#865959', '#865986', '#8659b2', '#8659df', 
-    '#868600', '#86862d', '#868659', '#868686', '#8686b2', '#8686df', '#86b200', '#86b22d', '#86b259', 
-    '#86b286', '#86b2b2', '#86b2df', '#86df00', '#86df2d', '#86df59', '#86df86', '#86dfb2', '#86dfdf', 
-    '#b20000', '#b2002d', '#b20059', '#b20086', '#b200b2', '#b200df', '#b22d00', '#b22d2d', '#b22d59', 
-    '#b22d86', '#b22db2', '#b22ddf', '#b25900', '#b2592d', '#b25959', '#b25986', '#b259b2', '#b259df', 
-    '#b28600', '#b2862d', '#b28659', '#b28686', '#b286b2', '#b286df', '#b2b200', '#b2b22d', '#b2b259', 
-    '#b2b286', '#b2b2b2', '#b2b2df', '#b2df00', '#b2df2d', '#b2df59', '#b2df86', '#b2dfb2', '#b2dfdf', 
-    '#df0000', '#df002d', '#df0059', '#df0086', '#df00b2', '#df00df', '#df2d00', '#df2d2d', '#df2d59', 
-    '#df2d86', '#df2db2', '#df2ddf', '#df5900', '#df592d', '#df5959', '#df5986', '#df59b2', '#df59df', 
-    '#df8600', '#df862d', '#df8659', '#df8686', '#df86b2', '#df86df', '#dfb200', '#dfb22d', '#dfb259', 
+    '#000000', '#00002d', '#000059', '#000086', '#0000b2', '#0000df', '#002d00', '#002d2d', '#002d59',
+    '#002d86', '#002db2', '#002ddf', '#005900', '#00592d', '#005959', '#005986', '#0059b2', '#0059df',
+    '#008600', '#00862d', '#008659', '#008686', '#0086b2', '#0086df', '#00b200', '#00b22d', '#00b259',
+    '#00b286', '#00b2b2', '#00b2df', '#00df00', '#00df2d', '#00df59', '#00df86', '#00dfb2', '#00dfdf',
+    '#2d0000', '#2d002d', '#2d0059', '#2d0086', '#2d00b2', '#2d00df', '#2d2d00', '#2d2d2d', '#2d2d59',
+    '#2d2d86', '#2d2db2', '#2d2ddf', '#2d5900', '#2d592d', '#2d5959', '#2d5986', '#2d59b2', '#2d59df',
+    '#2d8600', '#2d862d', '#2d8659', '#2d8686', '#2d86b2', '#2d86df', '#2db200', '#2db22d', '#2db259',
+    '#2db286', '#2db2b2', '#2db2df', '#2ddf00', '#2ddf2d', '#2ddf59', '#2ddf86', '#2ddfb2', '#2ddfdf',
+    '#590000', '#59002d', '#590059', '#590086', '#5900b2', '#5900df', '#592d00', '#592d2d', '#592d59',
+    '#592d86', '#592db2', '#592ddf', '#595900', '#59592d', '#595959', '#595986', '#5959b2', '#5959df',
+    '#598600', '#59862d', '#598659', '#598686', '#5986b2', '#5986df', '#59b200', '#59b22d', '#59b259',
+    '#59b286', '#59b2b2', '#59b2df', '#59df00', '#59df2d', '#59df59', '#59df86', '#59dfb2', '#59dfdf',
+    '#860000', '#86002d', '#860059', '#860086', '#8600b2', '#8600df', '#862d00', '#862d2d', '#862d59',
+    '#862d86', '#862db2', '#862ddf', '#865900', '#86592d', '#865959', '#865986', '#8659b2', '#8659df',
+    '#868600', '#86862d', '#868659', '#868686', '#8686b2', '#8686df', '#86b200', '#86b22d', '#86b259',
+    '#86b286', '#86b2b2', '#86b2df', '#86df00', '#86df2d', '#86df59', '#86df86', '#86dfb2', '#86dfdf',
+    '#b20000', '#b2002d', '#b20059', '#b20086', '#b200b2', '#b200df', '#b22d00', '#b22d2d', '#b22d59',
+    '#b22d86', '#b22db2', '#b22ddf', '#b25900', '#b2592d', '#b25959', '#b25986', '#b259b2', '#b259df',
+    '#b28600', '#b2862d', '#b28659', '#b28686', '#b286b2', '#b286df', '#b2b200', '#b2b22d', '#b2b259',
+    '#b2b286', '#b2b2b2', '#b2b2df', '#b2df00', '#b2df2d', '#b2df59', '#b2df86', '#b2dfb2', '#b2dfdf',
+    '#df0000', '#df002d', '#df0059', '#df0086', '#df00b2', '#df00df', '#df2d00', '#df2d2d', '#df2d59',
+    '#df2d86', '#df2db2', '#df2ddf', '#df5900', '#df592d', '#df5959', '#df5986', '#df59b2', '#df59df',
+    '#df8600', '#df862d', '#df8659', '#df8686', '#df86b2', '#df86df', '#dfb200', '#dfb22d', '#dfb259',
     '#dfb286', '#dfb2b2', '#dfb2df', '#dfdf00', '#dfdf2d', '#dfdf59', '#dfdf86', '#dfdfb2', '#dfdfdf',
-]
+
+    '#33ccff', '#bf00ff', '#bfff00', '#ffbfbf', '#008080', '#ff3300', '#80ff80', '#008000', '#339999',
+    '#55aa00', '#666600', '#404040', '#aaaa55', '#339900', '#003300', '#006600', '#5555aa', '#aa5555',
+    '#00ffaa', '#333366', '#ff6600', '#99ff33', '#ffff66', '#9900cc', '#00ccff', '#4000ff', '#993366',
+    '#66cc99', '#55ff00', '#33cc99', '#ff55aa', '#660000', '#55aaaa', '#ffbfff', '#aaff55', '#400000',
+    '#0000bf', '#bf0080', '#bfbfbf', '#804040', '#33ff66', '#40ff00', '#996699', '#003366', '#ffaaaa',
+    '#663366', '#400040', '#ff0099', '#5500aa', '#6699cc', '#330033', '#000055', '#ccff33', '#404000',
+    '#33cc00', '#0040bf', '#ff4040', '#6633cc', '#ff9900', '#bf8080', '#004000', '#ff0055', '#99ff00',
+    '#bfbf00', '#00bfff', '#0000aa', '#0080ff', '#55aaff', '#404080', '#8040ff', '#33ffff', '#9999cc',
+    '#33cccc', '#ff5555', '#ff00cc', '#cccccc', '#0040ff', '#40ffff', '#ffbf80', '#55ff55', '#ff9966',
+    '#004080', '#00aaaa', '#ffff80', '#55ffff', '#cc3399', '#ff0000', '#999900', '#ffff40', '#009933',
+    '#804000', '#bf0040', '#0033ff', '#ff55ff', '#cc0000', '#996600', '#80bf40', '#00ffbf', '#bf40bf',
+    '#66ff00', '#339966', '#9900ff', '#00ff55', '#aaffff', '#aaff00', '#800040', '#ff40ff', '#6666cc',
+    '#80bfff', '#9933ff', '#660066', '#663300', '#99cccc', '#400080', '#ffffcc', '#33cc66', '#80ff00',
+    '#009966', '#00bf00', '#ff00ff', '#996633', '#aaaaaa', '#00ff00', '#cc6600', '#3333cc', '#40bfff',
+    '#40bfbf', '#9933cc', '#cc9900', '#80ff40', '#408000', '#0000cc', '#33ffcc', '#ccff00', '#ff40bf',
+    '#ccff66', '#ff6666', '#4080ff', '#bf0000', '#55ffaa', '#808000', '#999933', '#000080', '#bf4040',
+    '#ffcc99', '#33ff33', '#3300ff', '#00ff66', '#aa0000', '#009999', '#00ff80', '#cc00ff', '#008040',
+    '#0099cc', '#000033', '#ff3333', '#550000', '#bfff80', '#bfbf40', '#00ff33', '#cc3300', '#660099',
+    '#ff0040', '#800000', '#aa00ff', '#80bfbf', '#6666ff', '#5555ff', '#009900', '#333399', '#00bf80',
+    '#bfffbf', '#80bf00', '#8080bf', '#ff80bf', '#bf4080', '#9999ff', '#408080', '#ccff99', '#99ffff',
+    '#33ff99', '#ffff55', '#3366cc', '#99cc00', '#4080bf', '#cccc33', '#336633', '#cc3366', '#000000',
+    '#006666', '#ffcc66', '#66ff66', '#0055aa', '#3399ff', '#80ffff', '#33cc33', '#993300', '#00ff40',
+    '#99cc99', '#aa55ff', '#cc9999', '#ff99ff', '#ff0066', '#ff4080', '#4040ff', '#ff66cc', '#66cc33',
+    '#ffbf40', '#8080ff', '#aaffaa', '#66cc00', '#669966', '#996666', '#cc6699', '#66cccc', '#8000bf',
+    '#ffff99', '#66ccff', '#003333', '#bf8040', '#663399', '#40ff40', '#bfffff', '#ffff00', '#aa55aa',
+    '#333333', '#4000bf', '#006699', '#bf80ff', '#ffffaa', '#0033cc', '#000066', '#bf40ff', '#cc6633',
+    '#cc9933', '#ffffff', '#80bf80', '#ff00bf', '#0099ff', '#ffcc00', '#333300', '#99cc33', '#40bf00',
+    '#006633', '#5500ff', '#ff66ff', '#cc66cc', '#ff8000', '#666666', '#cc3333', '#990099', '#550055',
+    '#005555', '#55aa55', '#ff3399', '#339933', '#00bfbf', '#6600ff', '#8040bf', '#ffaaff', '#33ff00',
+    '#330000', '#3366ff', '#ff5500', '#bf8000', '#66ffff', '#66ff99', '#808040', '#669999', '#555555',
+    '#808080', '#99ff66', '#00aa55', '#9966cc', '#40bf80', '#993399', '#999966', '#ff4000', '#99ccff',
+    '#ffbf00', '#cc99ff', '#ccccff', '#800080', '#00ffff', '#99cc66', '#bf00bf', '#bfbfff', '#0066cc',
+    '#666633', '#ccffff', '#336699', '#00cc99', '#00cc33', '#990000', '#cc99cc', '#990066', '#ff6633',
+    '#0055ff', '#004040', '#ffcccc', '#993333', '#00cccc', '#666699', '#00ff99', '#555500', '#330099',
+    '#cc66ff', '#3300cc', '#00aaff', '#99ff99', '#ff80ff', '#aa00aa', '#cc9966', '#ff9933', '#cc6666',
+    '#ffaa55', '#999999', '#00bf40', '#ff6699', '#00ffcc', '#660033', '#669900', '#cc00cc', '#8000ff',
+    '#bfff40', '#aa0055', '#cc0066', '#ff3366', '#bfbf80', '#ff8080', '#6600cc', '#ff9999', '#ffffbf',
+    '#0066ff', '#005500', '#bf80bf', '#330066', '#66ff33', '#ff33ff', '#0000ff', '#6699ff', '#00aa00',
+    '#aaaaff', '#cccc66', '#cc0033', '#66ffcc', '#99ffcc', '#ff33cc', '#aaaa00', '#ff0080', '#cc33cc',
+    '#336600', '#ffcc33', '#cc0099', '#00cc66', '#ff99cc', '#4040bf', '#804080', '#990033', '#ffccff',
+    '#3399cc', '#669933', '#cccc00', '#40ffbf', '#bf4000', '#ff8040', '#cc33ff', '#40ff80', '#cccc99',
+    '#ffff33', '#40bf40', '#66cc66', '#80ffbf', '#ccffcc', '#000040', '#aa5500', '#000099', '#3333ff',
+    '#6633ff', '#9966ff', '#003399', '#408040', '#336666', '#ff0033', '#ff00aa', '#ffaa00', '#0080bf',
+    '#663333', '#00cc00'})
