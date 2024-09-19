@@ -3,6 +3,8 @@
 # notebooks/*.ipynb
 
 lightning_logs/
+wandb/
+exports/*.pdf
 data/*
 outputs/
 !outputs/.gitkeep
