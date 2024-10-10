@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import default_collate
 from torch.utils.data import DataLoader
 from torch.utils.data import Subset
-from torchvision.transforms import Compose, Normalize, Resize, ToTensor
+from torchvision.transforms import Compose, Normalize, Resize, ToTensor, ColorJitter
 import lightning as L
 
 def build_datasets(config):
@@ -69,6 +69,11 @@ def build_detailed_test_dataloaders(dataset, config, type_of_tokens_to_test=None
 
     return {k: build_loader(dataset, config, shuffle=False, collate_fn=collate_fn)
             for k, collate_fn in collators_for_testing.items()}
+
+
+class ResponsiveSubset(Subset):
+    def __getattr__(self, attr):
+        return getattr(self.dataset, attr)
 
 
 class RandomPixelShuffle(object):
@@ -622,7 +627,7 @@ class CLEVRMultimodalSplit:
             images_dir = f'{config.base_path}/images/{split}'
 
             if processor:
-                yield cls(scenes_path, images_dir, processor=processor)
+                dataset = cls(scenes_path, images_dir, processor=processor)
             else:
                 dataset = cls(scenes_path, images_dir)
                 image_transform = [ToTensor(), Resize((224,224))]
@@ -630,10 +635,23 @@ class CLEVRMultimodalSplit:
                     image_transform.append(Normalize(0.5, 1))
                 if config.permute_pixels:
                     image_transform.append(RandomPixelShuffle())
+                if config.color_jitter:
+                    image_transform.append(ColorJitter(
+                        brightness=config.color_jitter_brightness, hue=config.color_jitter_hue,
+                        saturation=config.color_jitter_saturation, contrast=config.color_jitter_contrast,
+                        ))
                 image_transform = Compose(image_transform)
                 processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
                 dataset.processor = processor
-                yield dataset
+                
+            if config.trainset_subset < 1. and split == train_split:
+                len_ = len(dataset)
+                k = int(config.trainset_subset * len_)
+                indices = sorted(random.sample(list(range(len_)), k=k))
+                dataset = ResponsiveSubset(dataset, indices)
+                print(f'Creating subset of training set of N={len(dataset)}')
+                
+            yield dataset
 
 
 class CLEVRMultimodalFromFeaturesSplit:
@@ -690,13 +708,21 @@ class CLEVRMultimodalFromFeaturesSplit:
             features_path = f'{config.base_path}/images/{split}-{embedding_type}.h5'
 
             if processor:
-                yield cls(scenes_path, features_path, processor=processor)
+                dataset = cls(scenes_path, features_path, processor=processor)
             else:
                 dataset = cls(scenes_path, features_path)
                 image_transform = torch.from_numpy
                 processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
                 dataset.processor = processor
-                yield dataset
+
+            if config.trainset_subset < 1. and split == train_split:
+                len_ = len(dataset)
+                k = int(config.trainset_subset * len_)
+                indices = sorted(random.sample(list(range(len_)), k=k))
+                dataset = ResponsiveSubset(dataset, indices)
+                print(f'Creating subset of training set of N={len(dataset)}')
+            
+            yield dataset
 
 
 class CLEVRMultimodalTrainingSplit:

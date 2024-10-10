@@ -6,6 +6,7 @@ import os
 import pprint
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ from lightning import Trainer
 from tqdm.auto import tqdm
 
 from p_score import compute_p_scores
+from o_score import compute_o_scores
 from probing import compute_probe_metrics
 
 
@@ -100,7 +102,7 @@ def build_loader(dataset, collate_fn):
     return DataLoader(dataset, shuffle=True, collate_fn=collate_fn, **dlkwargs)
 
 
-def compute_results(exp_name):
+def compute_performance_results(exp_name):
     checkpoint = load_checkpoint(exp_name)
     config = load_config(exp_name)
 
@@ -138,15 +140,34 @@ def compute_results(exp_name):
             results[name] = test_results + train_results + common_results
 
         all_results[type_] = results
+        
+
+    all_results['config'] = vars(config)
+    all_results['random_baseline'] = random_baseline
+        
+    return all_results
+
+
+def compute_results(exp_name):
+    all_results = compute_performance_results(exp_name)
 
     print('Computing NMI Scores')
     all_results['sampled_nmi_scores'] = compute_nmi(exp_name, use_complete_dataset=False)
     all_results['nmi_scores'] = compute_nmi(exp_name, use_complete_dataset=True)
-    all_results['p_scores'] = compute_p_score(exp_name)
-    # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
 
-    all_results['config'] = vars(config)
-    all_results['random_baseline'] = random_baseline
+    print('Computing P-Scores')
+    all_results['p_scores'] = compute_p_score(exp_name)
+    all_results['p_scores_within_task'] = compute_p_score(exp_name, within_task=True)
+    
+    print('Computing P-Scores')
+    all_results['o_scores'] = compute_o_score(exp_name)
+    all_results['o_scores_within_task'] = compute_o_score(exp_name, triplet_within_task=True)
+    all_results['o_scores_within_color_shape'] = compute_o_score(exp_name, triplet_within_color_shape=True)
+    
+    # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
+    print('Computing Probing')
+    all_results['probing_metrics'] = compute_probing(exp_name)
+    
     with open(f'outputs/results/{exp_name}.json', 'w') as fp:
         json.dump(all_results, fp)
 
@@ -404,18 +425,21 @@ def compute_correlation(exp_name, use_complete_dataset=True, store_result=False)
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
     
 
-def compute_p_score(exp_name, store_result=False):
+def compute_p_score(exp_name, store_result=False, within_task=False):
     print(f'Computing P-Score for {exp_name}')
+    
+    metric_key = 'p_scores_within_task' if within_task else 'p_scores'
     
     # Updating results
     if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
         with open(f'outputs/results/{exp_name}.json') as fp:
             all_results = json.load(fp)
-        if 'p_scores' in all_results:
-            return all_results['p_scores']
+        if metric_key in all_results:
+            return all_results[metric_key]
     
-    all_p_scores = compute_p_scores(
-        exp_name, n_samples=1024, n_seeds_to_try=5, n_sampled_vertices=10, n_sampled_dichotomies=3500)
+    all_p_scores = compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=5,
+                                    n_sampled_vertices=10, n_sampled_dichotomies=3500,
+                                    dichotomy_within_task=within_task)
 
     if not store_result:
         return all_p_scores
@@ -423,7 +447,46 @@ def compute_p_score(exp_name, store_result=False):
     with open(f'outputs/results/{exp_name}.json') as fp:
         all_results = json.load(fp)
     
-    all_results['p_scores'] = all_p_scores
+    all_results[metric_key] = all_p_scores
+    with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
+        json.dump(all_results, fp)
+        
+    os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
+    
+
+def compute_o_score(exp_name, store_result=False, triplet_within_task=False, triplet_within_color_shape=False):
+    print(f'Computing O-Score for {exp_name}')
+    
+    if triplet_within_task:
+        metric_key = 'o_scores_within_task'
+    elif triplet_within_color_shape:
+        metric_key = 'o_scores_within_color_shape'
+    else:
+        metric_key = 'o_scores'
+
+    
+    # # Updating results
+    # if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
+    #     with open(f'outputs/results/{exp_name}.json') as fp:
+    #         all_results = json.load(fp)
+    #     if metric_key in all_results:
+    #         return all_results[metric_key]
+    
+    all_o_scores = compute_o_scores(exp_name,
+                                    n_samples=1024,
+                                    n_seeds_to_try=5,
+                                    n_sampled_vertices=10,
+                                    n_sampled_triplets=3500,
+                                    triplet_within_task=triplet_within_task,
+                                    triplet_within_color_shape=triplet_within_color_shape)
+
+    if not store_result:
+        return all_o_scores
+
+    with open(f'outputs/results/{exp_name}.json') as fp:
+        all_results = json.load(fp)
+    
+    all_results[metric_key] = all_o_scores
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
         
@@ -431,7 +494,7 @@ def compute_p_score(exp_name, store_result=False):
     
     
 def compute_probing(exp_name, store_result=False):
-    print(f'Computing P-Score for {exp_name}')
+    print(f'Computing Probing for {exp_name}')
     
     # Updating results
     if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
@@ -463,8 +526,12 @@ if __name__ == '__main__':
     parser.add_argument("--exp_name", type=str)
     parser.add_argument('--update_results_without_spheres', action='store_true', default=False)
     parser.add_argument('--update_with_p_scores', action='store_true', default=False)
+    parser.add_argument('--update_with_p_scores_within_task', action='store_true', default=False)
     parser.add_argument('--update_with_probe_metrics', action='store_true', default=False)
     parser.add_argument('--update_results_with_permuted_pixels', action='store_true', default=False)
+    parser.add_argument('--update_with_o_scores', action='store_true', default=False)
+    parser.add_argument('--update_with_o_scores_within_task', action='store_true', default=False)
+    parser.add_argument('--update_with_o_scores_within_color_shape', action='store_true', default=False)
     args = parser.parse_args()
         
     # compute_nmi(args.exp_name, use_complete_dataset=False, store_result=True)
@@ -478,6 +545,18 @@ if __name__ == '__main__':
     elif args.update_with_p_scores:
         fn_name = 'P-Score'
         fn_to_apply = partial(compute_p_score, store_result=True)
+    elif args.update_with_p_scores_within_task:
+        fn_name = 'P-Score Within Task'
+        fn_to_apply = partial(compute_p_score, store_result=True, within_task=True)
+    elif args.update_with_o_scores:
+        fn_name = 'O-Score'
+        fn_to_apply = partial(compute_o_score, store_result=True)
+    elif args.update_with_o_scores_within_task:
+        fn_name = 'O-Score Within Task'
+        fn_to_apply = partial(compute_o_score, store_result=True, triplet_within_task=True)
+    elif args.update_with_o_scores_within_color_shape:
+        fn_name = 'O-Score Within Task'
+        fn_to_apply = partial(compute_o_score, store_result=True, triplet_within_color_shape=True)
     elif args.update_with_probe_metrics:
         fn_name = 'Probing'
         fn_to_apply = partial(compute_probing, store_result=True)
@@ -496,18 +575,24 @@ if __name__ == '__main__':
                 continue
             if 'overloading' in exp_name and 'overloading_to=8.json' not in exp_name:
                 continue
-            # if 'seed' not in exp_name:
+            # if 'seed' in exp_name:
             #     continue
             print(f'Updating {fn_name} for {exp_name}')
             try:
+                start = time.time()
                 fn_to_apply(exp_name)
+                end = time.time()
+                print(f'Result computed in {end-start:.1f} seconds')
             except FileNotFoundError as e:
                 print(f'Unable to update {exp_name}')
                 print(str(e))
     else:
         try:
+            start = time.time()
             fn_to_apply(args.exp_name)
+            end = time.time()
+            print(f'Result computed in {end-start:.1f} seconds')
         except FileNotFoundError as e:
             print(f'Unable to update {args.exp_name}')
             print(str(e))
-        
+ 

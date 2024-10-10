@@ -75,7 +75,13 @@ def read_args(defaults=False):
     parser.add_argument("--n_tokens", type=int, default=96)
     parser.add_argument("--max_scene_size", type=int, default=50)
     parser.add_argument('--not_normalize_image', action='store_true', default=False)
+    parser.add_argument("--trainset_subset", type=float, default=1.)
     parser.add_argument('--permute_pixels', action='store_true', default=False)
+    parser.add_argument('--color_jitter', action='store_true', default=False)
+    parser.add_argument("--color_jitter_brightness", type=float, default=0.0)
+    parser.add_argument("--color_jitter_hue", type=float, default=0.0)
+    parser.add_argument("--color_jitter_saturation", type=float, default=0.0)
+    parser.add_argument("--color_jitter_contrast", type=float, default=0.0)
 
     # Model
     parser.add_argument("--d_hidden", type=int, default=256)

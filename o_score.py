@@ -25,55 +25,57 @@ from sklearn.decomposition import PCA
 pp = pprint.PrettyPrinter(indent=2)
 
 
-def all_possible_dichotomies(unique_tokens, dichotomy_within_task_idx=None):
-    dichotomies = set()
-    for dichotomic_tokens_idx in range(len(unique_tokens)):
-        if dichotomy_within_task_idx is not None:
-            if dichotomic_tokens_idx != dichotomy_within_task_idx:
-                continue
+def all_possible_triplets(unique_tokens, only_task_mod_ids=None):
+    only_task_mod_idx1 = only_task_mod_idx2 = None
+    if only_task_mod_ids is not None:
+        only_task_mod_idx1, only_task_mod_idx2 = only_task_mod_ids
+        
+    task_ids = list(range(len(unique_tokens)))
+    
+    triplets = set()
+    context_tokens = unique_tokens.copy()
+    for context in product(*context_tokens):
+        for task_mod_idx1, task_mod_idx2 in combinations(task_ids, r=2):
+            if task_mod_idx1 == task_mod_idx2:
+                    continue
 
-        context_tokens = unique_tokens[:dichotomic_tokens_idx] + unique_tokens[dichotomic_tokens_idx+1:]
-        dichotomic_tokens = unique_tokens[dichotomic_tokens_idx]
-        for dichotomic_pair in combinations(dichotomic_tokens, r=2): # maybe refactor to permutations
-            for pair in [dichotomic_pair, tuple(reversed(dichotomic_pair))]:
-                for context0 in product(*context_tokens):
-                    for context1 in product(*context_tokens):
-                        if context0 == context1:
-                            continue
+            if only_task_mod_ids is not None:
+                if only_task_mod_idx1 is not None and task_mod_idx1 != only_task_mod_idx1: 
+                    continue
+                if only_task_mod_idx2 is not None and task_mod_idx2 != only_task_mod_idx2:
+                    continue
+                    
+            tokens_mod1 = unique_tokens[task_mod_idx1]
+            tokens_mod2 = unique_tokens[task_mod_idx2]
+            for token_mod_idx1, token_mod_idx2 in product(tokens_mod1, tokens_mod2):
+                if context[task_mod_idx1] == token_mod_idx1:
+                    continue
+                if context[task_mod_idx2] == token_mod_idx2:
+                    continue
+                
+                pivot = list(context).copy()
+                v1 = list(context).copy()
+                v1[task_mod_idx1] = token_mod_idx1
+                v2 = list(context).copy()
+                v2[task_mod_idx2] = token_mod_idx2
+                triplets.add((tuple(pivot),
+                              tuple(v1),
+                              tuple(v2)))
+    return list(triplets)
 
-                        a, b = pair
-                        if a == b:
-                            continue
-                        from_v0 = list(context0).copy()
-                        from_v0.insert(dichotomic_tokens_idx, a)
-                        from_v1 = list(context1).copy()
-                        from_v1.insert(dichotomic_tokens_idx, a)
-                        to_v0 = list(context0).copy()
-                        to_v0.insert(dichotomic_tokens_idx, b)
-                        to_v1 = list(context1).copy()
-                        to_v1.insert(dichotomic_tokens_idx, b)
 
-                        dichotomies.add((tuple(from_v0),
-                                            tuple(from_v1),
-                                            tuple(to_v0),
-                                            tuple(to_v1)))
-
-    return list(dichotomies)
-
-def is_possible(from_v0, from_v1, to_v0, to_v1, prop_index):
-    if not prop_index[from_v0]:
+def is_possible(pivot, v0, v1, prop_index):
+    if not prop_index[pivot]:
         return False
-    if not prop_index[from_v1]:
+    if not prop_index[v0]:
         return False
-    if not prop_index[to_v0]:
-        return False
-    if not prop_index[to_v1]:
+    if not prop_index[v1]:
         return False
     return True
 
 
-def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vertices=20,
-                     n_sampled_dichotomies=3500, dichotomy_within_task=False):
+def compute_o_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vertices=20,
+                     n_sampled_triplets=3500, triplet_within_task=False, triplet_within_color_shape=False):
     device = torch.device('cuda')
 
     checkpoint = load_checkpoint(exp_name, epoch=None)
@@ -163,14 +165,14 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
 
     model.transformer.register_forward_hook(hook_feat_map)
     
-    all_p_scores = {}
+    all_o_scores = {}
     tasks = ['sizes', 'colors', 'materials', 'shapes']
     for test_name, loader in [
             ('test', test_loaders), ('systematic', systematic_loaders), ('complete', complete_loaders)]:
-        all_p_scores[test_name] = {}
+        all_o_scores[test_name] = {}
         for task_idx, task in enumerate(tasks):
-            all_p_scores[test_name][task] = []
-            dichotomies = None
+            all_o_scores[test_name][task] = []
+            triplets = None
             for _ in range(n_seeds_to_try):
                 images, scenes, labels = next(iter(loader[task]))
                 images, scenes, labels = images.to(device), scenes.to(device), labels.to(device)
@@ -208,42 +210,44 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
                 unique_gts = gt.unique().tolist()
                 unique_tokens[task_idx] = unique_gts
                 
-                dichotomy_within_task_idx = None
-                if dichotomy_within_task:
-                    dichotomy_within_task_idx = task_idx
                 
-                if not dichotomies:
-                    dichotomies = all_possible_dichotomies(unique_tokens,
-                                                           dichotomy_within_task_idx=dichotomy_within_task_idx)
-                possible_dichotomies = [p for p in dichotomies if is_possible(*p, prop_index=prop_index)]
+                only_task_mod_ids = None
+                if triplet_within_task: # task against everything else
+                    only_task_mod_ids = (task_idx, None)
+                elif triplet_within_color_shape:
+                    only_task_mod_ids = (tasks.index('colors'), tasks.index('shapes'))
                 
-                if n_sampled_dichotomies < len(possible_dichotomies):
-                    sampled_dichotomies = random.sample(possible_dichotomies, k=n_sampled_dichotomies)
+                if not triplets:
+                    triplets = all_possible_triplets(unique_tokens,
+                                                     only_task_mod_ids=only_task_mod_ids)
+                possible_triplets = [p for p in triplets if is_possible(*p, prop_index=prop_index)]
+                
+                if n_sampled_triplets < len(possible_triplets):
+                    sampled_triplets = random.sample(possible_triplets, k=n_sampled_triplets)
                 else:
-                    sampled_dichotomies = possible_dichotomies
+                    sampled_triplets = possible_triplets
 
-                p_scores = []
-                for from_v0, from_v1, to_v0, to_v1 in tqdm(sampled_dichotomies):
+                o_scores = []
+                for pivot, v0, v1 in tqdm(sampled_triplets):
                     for _ in range(n_sampled_vertices):
-                        from_v0_idx = random.choice(prop_index[from_v0])
-                        from_v1_idx = random.choice(prop_index[from_v1])
-                        to_v0_idx = random.choice(prop_index[to_v0])
-                        to_v1_idx = random.choice(prop_index[to_v1])
+                        pivot_idx = random.choice(prop_index[pivot])
+                        v0_idx = random.choice(prop_index[v0])
+                        v1_idx = random.choice(prop_index[v1])
 
-                        vec0 = feats[to_v0_idx] - feats[from_v0_idx]
-                        vec1 = feats[to_v1_idx] - feats[from_v1_idx]
+                        vec0 = feats[v0_idx] - feats[pivot_idx]
+                        vec1 = feats[v1_idx] - feats[pivot_idx]
 
-                        p_score = vec0 @ vec1 / (vec0.norm() * vec1.norm())
-                        p_scores.append(float(p_score))
+                        o_score = vec0 @ vec1 / (vec0.norm() * vec1.norm())
+                        o_scores.append(np.sqrt(1 - float(o_score)**2))
                 
-                all_p_scores[test_name][task].append(np.mean(p_scores))
+                all_o_scores[test_name][task].append(np.mean(o_scores))
 
-    return all_p_scores
+    return all_o_scores
 
 
 if __name__ == '__main__':
     n_colors = 8
     exp_name = f'mmlm--n_colors={n_colors}c--mlm_probability=0.15'
-    all_p_scores = compute_p_scores(exp_name)
-    with open(f'outputs/results/{exp_name}_p_scores.json', 'w') as fp:
-        json.dump(all_p_scores, fp)
+    all_o_scores = compute_o_scores(exp_name)
+    with open(f'outputs/results/{exp_name}_o_scores.json', 'w') as fp:
+        json.dump(all_o_scores, fp)
