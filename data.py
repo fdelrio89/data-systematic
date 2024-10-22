@@ -631,15 +631,15 @@ class CLEVRMultimodalSplit:
             else:
                 dataset = cls(scenes_path, images_dir)
                 image_transform = [ToTensor(), Resize((224,224))]
-                if not config.not_normalize_image:
-                    image_transform.append(Normalize(0.5, 1))
-                if config.permute_pixels:
-                    image_transform.append(RandomPixelShuffle())
                 if config.color_jitter:
                     image_transform.append(ColorJitter(
                         brightness=config.color_jitter_brightness, hue=config.color_jitter_hue,
                         saturation=config.color_jitter_saturation, contrast=config.color_jitter_contrast,
                         ))
+                if not config.not_normalize_image:
+                    image_transform.append(Normalize(0.5, 1))
+                if config.permute_pixels:
+                    image_transform.append(RandomPixelShuffle())
                 image_transform = Compose(image_transform)
                 processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
                 dataset.processor = processor
