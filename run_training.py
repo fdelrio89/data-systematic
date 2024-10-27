@@ -35,7 +35,7 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
     callbacks = [] if callbacks is None else callbacks
     if not os.path.exists(checkpoint_path):
         os.makedirs(checkpoint_path, exist_ok=True)
-    save_top_k = -1 if config.multimodal_pretraining else 1 # if pre-training save all checkpoints
+    save_top_k = -1
     callbacks.append(ModelCheckpoint(dirpath=checkpoint_path,
                                      save_top_k=save_top_k,
                                      monitor="val_loss/dataloader_idx_0",
