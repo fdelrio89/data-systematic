@@ -13,6 +13,7 @@ from lightning.pytorch.loggers.csv_logs import CSVLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from config import load_config
+from data import CollatorForMaskedVQA
 from data import build_datasets, build_loader, build_detailed_test_dataloaders
 from data import CurriculumData, CurriculumScheduler, build_common_colors_subset
 from model import build_model
@@ -77,8 +78,8 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
         loggers.append(csv_logger)
 
     reload_dataloaders_every_n_epochs = 1 if config.use_curriculum else 0
+    print(f'Working with: {torch.cuda.device_count()} GPUs')
     if torch.cuda.device_count() > 1:
-        print(f'Working with: {torch.cuda.device_count()} GPUs')
         return Trainer(max_epochs=config.max_epochs,
                        accelerator="gpu",
                        devices=torch.cuda.device_count(),
@@ -89,11 +90,10 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
                        reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs)
 
     else:
-        print(f'Working with: {torch.cuda.device_count()} GPU')
         return Trainer(max_epochs=config.max_epochs,
                        accelerator="gpu",
-                       # devices="auto",
                        devices=torch.cuda.device_count(),
+                       precision="16",
                        logger=loggers,
                        callbacks=callbacks,
                        reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs)
@@ -129,6 +129,110 @@ def build_tester(config, experiment_name):
                    logger=loggers)
 
 
+def update_config_with_data(config, dataset):
+    config.pad_idx = dataset.pad_idx
+    config.n_tokens = dataset.n_tokens
+
+
+def build_data_for_training(config, train_callbacks):
+    if config.multimodal_pretraining:
+        train_dataset, test_dataset, systematic_dataset, cmn_systematic_dataset = build_datasets(config)
+        update_config_with_data(config, train_dataset)
+
+        if config.use_curriculum:
+            train_subsets = build_common_colors_subset(train_dataset, config)
+            train_dataset = CurriculumData(train_subsets)
+            train_callbacks.append(CurriculumScheduler(train_dataset, config.max_epochs))
+
+        train_loader = build_loader(train_dataset, config, shuffle=True)
+        test_loader = build_loader(test_dataset, config, shuffle=False)
+        systematic_loader = build_loader(systematic_dataset, config, shuffle=False)
+        cmn_systematic_loader = build_loader(cmn_systematic_dataset, config, shuffle=False)
+        test_detailed_loaders = build_detailed_test_dataloaders(test_dataset, config) # type_of_tokens_to_test
+        systematic_detailed_loaders = build_detailed_test_dataloaders(systematic_dataset, config) # type_of_tokens_to_test
+        cmn_systematic_detailed_loaders = build_detailed_test_dataloaders(cmn_systematic_dataset, config) # type_of_tokens_to_test
+        train_data_args = {
+            'train_dataloaders': train_loader,
+            'val_dataloaders': [
+                    test_loader, systematic_loader,
+                    test_detailed_loaders['color'],
+                    systematic_detailed_loaders['color'],
+                    test_detailed_loaders['shapes'],
+                    systematic_detailed_loaders['shapes'],
+                    cmn_systematic_detailed_loaders['color'],
+                    cmn_systematic_detailed_loaders['shapes'],
+                    ],
+        }
+        test_data_args = {
+            'dataloaders': [test_loader, systematic_loader, cmn_systematic_loader],
+        }
+
+        return train_data_args, test_data_args, test_detailed_loaders, systematic_detailed_loaders
+
+    else:
+        test_datasets = {}
+        systematic_datasets = {}
+        cmn_systematic_datasets = {}
+        (train_dataset,
+         test_datasets['all'],
+         test_datasets['shape'],
+         test_datasets['size'],
+         test_datasets['color'],
+         test_datasets['material'],
+         systematic_datasets['all'],
+         systematic_datasets['shape'],
+         systematic_datasets['size'],
+         systematic_datasets['color'],
+         systematic_datasets['material'],
+         cmn_systematic_datasets['all'],
+         cmn_systematic_datasets['shape'],
+         cmn_systematic_datasets['size'],
+         cmn_systematic_datasets['color'],
+         cmn_systematic_datasets['material']
+         ) = build_datasets(config)
+
+        vqa_collator = CollatorForMaskedVQA(config, train_dataset.processor)
+
+        train_loader = build_loader(train_dataset, config, shuffle=True, collate_fn=vqa_collator)
+
+        train_data_args = {
+            'train_dataloaders': train_loader,
+            'val_dataloaders': [
+                    build_loader(test_datasets['all'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(systematic_datasets['all'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(test_datasets['color'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(systematic_datasets['color'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(test_datasets['shape'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(systematic_datasets['shape'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(cmn_systematic_datasets['color'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(cmn_systematic_datasets['shape'], config, shuffle=False, collate_fn=vqa_collator),
+                    ],
+        }
+        test_data_args = {
+            'dataloaders': [
+                    build_loader(test_datasets['all'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(systematic_datasets['all'], config, shuffle=False, collate_fn=vqa_collator),
+                    build_loader(cmn_systematic_datasets['all'], config, shuffle=False, collate_fn=vqa_collator),
+            ]
+        }
+
+        test_detailed_loaders = {
+            'color': build_loader(test_datasets['color'], config, shuffle=False, collate_fn=vqa_collator),
+            'shapes': build_loader(test_datasets['shape'], config, shuffle=False, collate_fn=vqa_collator),
+            'materials': build_loader(test_datasets['material'], config, shuffle=False, collate_fn=vqa_collator),
+            'size': build_loader(test_datasets['size'], config, shuffle=False, collate_fn=vqa_collator),
+        }
+
+        systematic_detailed_loaders = {
+            'color': build_loader(systematic_datasets['color'], config, shuffle=False, collate_fn=vqa_collator),
+            'shapes': build_loader(systematic_datasets['shape'], config, shuffle=False, collate_fn=vqa_collator),
+            'materials': build_loader(systematic_datasets['material'], config, shuffle=False, collate_fn=vqa_collator),
+            'size': build_loader(systematic_datasets['size'], config, shuffle=False, collate_fn=vqa_collator),
+        }
+
+        return train_data_args, test_data_args, test_detailed_loaders, systematic_detailed_loaders
+
+
 def main(config):
     seed_everything(config.seed, workers=True)
 
@@ -138,38 +242,10 @@ def main(config):
 
     experiment_name = os.environ.get("EXP_NAME", "default")
     train_callbacks = []
-
-    train_dataset, test_dataset, systematic_dataset, cmn_systematic_dataset = build_datasets(config)
-    config.pad_idx = train_dataset.pad_idx
-    config.n_tokens = train_dataset.n_tokens
-    
-    if config.use_curriculum:
-        train_subsets = build_common_colors_subset(train_dataset, config)
-        train_dataset = CurriculumData(train_subsets)
-        train_callbacks.append(CurriculumScheduler(train_dataset, config.max_epochs))
-
-    train_loader = build_loader(train_dataset, config, shuffle=True)
-    test_loader = build_loader(test_dataset, config, shuffle=False)
-    systematic_loader = build_loader(systematic_dataset, config, shuffle=False)
-    cmn_systematic_loader = build_loader(cmn_systematic_dataset, config, shuffle=False)
-    test_detailed_loaders = build_detailed_test_dataloaders(test_dataset, config) # type_of_tokens_to_test
-    systematic_detailed_loaders = build_detailed_test_dataloaders(systematic_dataset, config) # type_of_tokens_to_test
-    cmn_systematic_detailed_loaders = build_detailed_test_dataloaders(cmn_systematic_dataset, config) # type_of_tokens_to_test
-    train_data_args = {
-        'train_dataloaders': train_loader,
-        'val_dataloaders': [
-                test_loader, systematic_loader,
-                test_detailed_loaders['color'],
-                systematic_detailed_loaders['color'],
-                test_detailed_loaders['shapes'],
-                systematic_detailed_loaders['shapes'],
-                cmn_systematic_detailed_loaders['color'],
-                cmn_systematic_detailed_loaders['shapes'],
-                ],
-    }
-    test_data_args = {
-        'dataloaders': [test_loader, systematic_loader, cmn_systematic_loader],
-    }
+    (train_data_args,
+     test_data_args,
+     test_detailed_loaders,
+     systematic_detailed_loaders) = build_data_for_training(config, train_callbacks)
 
     training_model = build_model(config)
 
@@ -206,4 +282,4 @@ if __name__ == "__main__":
     config = load_config()
     main(config)
     experiment_name = os.environ.get("EXP_NAME", "default")
-    compute_results(experiment_name)
+    compute_results(experiment_name, only_performance=(not config.multimodal_pretraining))

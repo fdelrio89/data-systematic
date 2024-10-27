@@ -10,23 +10,29 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 from torch.utils.data import DataLoader
-from torch.utils.data import Subset
+from torch.utils.data import Subset, ConcatDataset
 from torchvision.transforms import Compose, Normalize, Resize, ToTensor, ColorJitter
 import lightning as L
 
 def build_datasets(config):
     if config.multimodal_pretraining:
         if config.use_embedding_loaded or config.use_vit_embedding_loaded:
+            print('Building CLEVRMultimodalFromFeaturesSplit')
             return CLEVRMultimodalFromFeaturesSplit.build_splits(config)
         else:
+            print('Building CLEVRMultimodalSplit')
             return CLEVRMultimodalSplit.build_splits(config)
     elif config.multimodal_training:
+        print('Building CLEVRMultimodalTrainingSplit')
         return CLEVRMultimodalTrainingSplit.build_splits(config)
     elif config.image_pretraining:
+        print('Building CLEVRMultimodalSplit')
         return CLEVRMultimodalSplit.build_splits(config)
     elif config.use_txt_scene:
+        print('Building CLEVRTextSplit')
         return CLEVRTextSplit.build_splits(config)
     else:
+        print('Building CLEVRSplit')
         return CLEVRSplit.build_splits(config)
 
 
@@ -74,6 +80,11 @@ def build_detailed_test_dataloaders(dataset, config, type_of_tokens_to_test=None
 class ResponsiveSubset(Subset):
     def __getattr__(self, attr):
         return getattr(self.dataset, attr)
+
+
+class ResponsiveConcatDataset(ConcatDataset):
+    def __getattr__(self, attr):
+        return getattr(self.datasets[0], attr)
 
 
 class RandomPixelShuffle(object):
@@ -134,6 +145,33 @@ class CollatorForMaskedLanguageModeling:
         inputs[indices_random] = random_words[indices_random]
 
         # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+        return inputs, labels
+
+
+class CollatorForMaskedVQA:
+    def __init__(self, config, processor):
+        self.config = config
+        self.special_token_idxs = torch.tensor(processor.special_token_idxs).long()
+        self.non_special_token_idxs = torch.tensor(processor.non_special_token_idxs).long()
+        self.mask_token_idx = processor.mask_token_idx
+        self.image_patch_sizes = config.patch_height, config.patch_width
+
+    def __call__(self, batch):
+        images, question_answers = default_collate(batch)
+        scenes, answer_labels = self.build_answer_targets(question_answers)
+        images_labels = self.build_null_image_targets(images)
+        labels = torch.cat((images_labels, answer_labels), dim=1)
+        return images, scenes, labels
+
+    def build_null_image_targets(self, images):
+        b, *_ = images.shape
+        # n_patches = int(h / self.image_patch_sizes[0]) * int(w / self.image_patch_sizes[1])
+        n_patches = self.config.n_patches
+        return torch.full((b, n_patches), -100)
+
+    def build_answer_targets(self, inputs):
+        labels = inputs.clone()
+        labels[:,:-1] = -100  # We only compute loss on answer token
         return inputs, labels
 
 
@@ -410,14 +448,13 @@ class CLEVRSplit:
     def __init__(self, questions_path, images_dir, processor=None):
         self.questions_path = questions_path
         self.images_dir = images_dir
+        self.processor = processor
 
         print('Loading questions')
         with open(questions_path, 'r') as fp:
             self.questions = json.load(fp)['questions']
 
-        self.processor = processor
-
-    def __getitem__(self, idx):
+    def retrieve_raw(self, idx):
         question = self.questions[idx]
 
         question_str = question['question']
@@ -425,19 +462,22 @@ class CLEVRSplit:
         image_filename = question['image_filename']
 
         image_path = f'{self.images_dir}/{image_filename}'
-        image = self.load_image(image_path)
-
-        if self.processor:
-            image, question_str, answer_str = self.processor(image, question_str, answer_str)
+        image = Image.open(image_path).convert('RGB')
 
         return image, question_str, answer_str
-
-    def load_image(self, image_path):
-        return Image.open(image_path).convert('RGB')
+    
+    def __getitem__(self, idx):
+        image, question, answer = self.retrieve_raw(idx)
+        image, question_answer = self.processor(image, question, answer)
+        return image, question_answer
 
     @property
     def pad_idx(self):
         return self.processor.vocabulary[self.processor.pad_token]
+
+    @property
+    def n_tokens(self):
+        return self.processor.n_tokens
 
     def iter_qa(self):
         for question in self.questions:
@@ -451,44 +491,90 @@ class CLEVRSplit:
         train_split = 'trainA'
         val_split = 'valA'
         test_split = 'valB'
+        # common_test_split = 'valB'
+        common_test_split = 'valC'
         processor = None
+        property_queries = ['shape', 'size', 'color', 'material']
 
-        for split in [train_split, val_split, test_split]:
-            questions_path = f'{config.base_path}/questions/CLEVR_{split}_questions.json'
-            images_dir = f'{config.base_path}/images/{split}'
+        questions_path = f'{config.base_path}/questions/CLEVR_{train_split}_questions.json'
+        images_dir = f'{config.base_path}/images/{train_split}'     
+        train_dataset = cls(questions_path, images_dir)
+        
+        image_transform = [ToTensor(), Resize((224,224))]
+        if config.color_jitter:
+            image_transform.append(ColorJitter(
+                brightness=config.color_jitter_brightness, hue=config.color_jitter_hue,
+                saturation=config.color_jitter_saturation, contrast=config.color_jitter_contrast,
+                ))
+        if not config.not_normalize_image:
+            image_transform.append(Normalize(0.5, 1))
+        if config.permute_pixels:
+            image_transform.append(RandomPixelShuffle())
+        image_transform = Compose(image_transform)
+        processor = CLEVRProcessor(train_dataset, config, image_transform=image_transform)
+        train_dataset.processor = processor
 
-            if processor:
-                yield cls(questions_path, images_dir, processor=processor)
-            else:
-                dataset = cls(questions_path, images_dir)
+        if config.trainset_subset < 1. and split == train_split:
+            assert False, "Subset Not Yet Implemented"
 
-                image_transform = [ToTensor()]
-                if not config.not_normalize_image:
-                    image_transform.append(Normalize(0.5, 1))
-                image_transform = Compose(image_transform)
-                processor = CLEVRProcessor(dataset, config, image_transform=image_transform)
-                dataset.processor = processor
-
-                yield dataset
+        yield train_dataset
+        
+        for split in [val_split, test_split, common_test_split]:
+            test_datasets = []
+            for property_query in property_queries:
+                questions_path = f'{config.base_path}/questions/CLEVR_{split}_{property_query}_questions.json'
+                images_dir = f'{config.base_path}/images/{split}'
+                test_datasets.append(cls(questions_path, images_dir, processor=processor))
+                       
+            yield ResponsiveConcatDataset(test_datasets)
+            yield from test_datasets
 
 
 class CLEVRProcessor:
-    def __init__(self, dataset, config, image_transform=None, pad_questions=True, max_question_size=45):
+    def __init__(self,
+                 dataset,
+                 config,
+                 image_transform=None,
+                 pad_questions=True,
+                 max_question_size=45):
+
+        self.pad_questions = pad_questions
+        self.max_question_size = config.max_question_size
+
+        # self.aug_zero = max(config.aug_zero, 1) # older experiment used 0 as base
+        # self.aug_zero_independent = config.aug_zero_independent
+        # self.aug_zero_color = config.aug_zero_color
+
+        # self.token_translations = self.load_token_translations(config)
+
         self.cls_token = '[CLS]'
         self.pad_token = '[PAD]'
-        self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
-        self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
+        self.mask_token = '[MASK]'
+        # self.special_tokens = ['[CLS]', '[PAD]', '[SEP]', '[MASK]']
+        self.special_tokens = ['[CLS]', '[PAD]', '[SEP]']
         self.image_transform = image_transform
-        self.pad_questions = pad_questions
-        self.max_question_size = max_question_size
-
+        
+        self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
+        self.base_n_tokens = len(self.vocabulary)        
+        # self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
+        
+        self.non_special_tokens = [t for t in self.vocabulary if t not in self.special_tokens]
+        self.special_token_idxs = [self.to_token_idx(t) for t in self.special_tokens]
+        self.special_token_idxs_t = torch.tensor(self.special_token_idxs)
+        self.non_special_token_idxs = [self.to_token_idx(t) for t in self.non_special_tokens]
+        self.non_special_token_idxs_t = torch.tensor(self.non_special_token_idxs)
+        self.cls_token_idx = self.to_token_idx(self.cls_token)
+        self.pad_token_idx = self.to_token_idx(self.pad_token)
+        self.mask_token_idx = self.to_token_idx(self.mask_token)
+        self.color_token_idxs = [self.to_token_idx(t) for t in self.vocabulary if t in ALL_POSSIBLE_COLORS]
+        self.min_color_idx = min(self.color_token_idxs)
+        self.color_token_idxs_t = torch.tensor(self.color_token_idxs)
+        self.n_color_tokens = len(self.color_token_idxs)
 
     def load_or_build_vocabulary(self, config, dataset):
         if os.path.exists(config.vocabulary_path):
-            print('Loading Vocabulary')
             return self.load_vocabulary(config.vocabulary_path)
         else:
-            print('Building Vocabulary')
             return self.build_vocabulary(dataset)
 
     def load_vocabulary(self, vocabulary_path):
@@ -500,10 +586,11 @@ class CLEVRProcessor:
         return vocabulary, inv_vocabulary
 
     def build_vocabulary(self, dataset):
-        vocabulary = []
+        vocabulary = set()
+        
         print('Building vocabulary')
         for question_str, _ in tqdm(dataset.iter_qa(), total=len(dataset)):
-            vocabulary.extend(question_str.split())
+            vocabulary.update(self.tokenize(question_str))
 
         vocabulary = sorted(list(set(vocabulary)))
         vocabulary = [self.cls_token, self.pad_token] + vocabulary
@@ -532,23 +619,26 @@ class CLEVRProcessor:
 
         return padded_question
 
-    def __call__(self, *clevr_sample):
-        image, question_str, answer_str = clevr_sample
+    def __call__(self, image, question, answer):
+        question_answer = question + ' ' + answer
+        tokenized_question_answer = self.tokenize_sequence(
+            question_answer, self.max_question_size, self.pad_questions)
+        tokenized_question_answer = torch.tensor(tokenized_question_answer).long()
 
-        tokenized_question = self.tokenize_sequence(
-            question_str, self.max_question_size, self.pad_questions)
-        tokenized_question = torch.tensor(tokenized_question).long()
-
-        answer_idx = self.answers_index[answer_str]
-
+        # answer_idx = self.answers_index[answer]
         if self.image_transform:
             image = self.image_transform(image)
 
-        return image, tokenized_question, answer_idx
+        return image, tokenized_question_answer
+
+    def to_token_idx(self, word):
+        # if self.token_translations:
+        #     word = self.token_translations.get(word, word)
+        return self.vocabulary[word]
 
     def tokenize_sequence(self, str_seq, max_seq_size, pad_seq, lower=True):
-        tokenized_seq = [self.vocabulary[w] for w in self.tokenize(str_seq, lower=lower)]
-        tokenized_seq = [self.vocabulary[self.cls_token]] + tokenized_seq
+        tokenized_seq = [self.to_token_idx(w) for w in self.tokenize(str_seq, lower=lower)]
+        tokenized_seq = [self.to_token_idx(self.cls_token)] + tokenized_seq
         if pad_seq:
             tokenized_seq = self.pad_sequence(tokenized_seq, max_seq_size)
         return tokenized_seq
@@ -563,10 +653,17 @@ class CLEVRProcessor:
         pads_to_use = max_sequence_size - len(sequence)
         pads_to_use = max(pads_to_use, 0)
 
-        padded_sequence = sequence + pads_to_use*[self.vocabulary[self.pad_token]]
+        padded_sequence = sequence + pads_to_use*[self.to_token_idx(self.pad_token)]
         padded_sequence = padded_sequence[:max_sequence_size] # if question is longer than should be
 
         return padded_sequence
+
+    @property
+    def n_tokens(self):
+        # if self.aug_zero_color:
+        #     return self.base_n_tokens + (self.aug_zero-1)*self.n_color_tokens
+        # return self.aug_zero*self.base_n_tokens
+        return self.base_n_tokens
 
 
 class CLEVRMultimodalSplit:
@@ -597,9 +694,7 @@ class CLEVRMultimodalSplit:
 
     def __getitem__(self, idx):
         image, scene = self.retrieve_raw(idx)
-
         image, scene_str = self.processor(image, scene)
-
         return image, scene_str
 
     @property

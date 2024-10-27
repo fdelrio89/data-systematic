@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics.cluster import normalized_mutual_info_score
 
 from config import load_config
-from data import build_datasets, CollatorForMaskedSelectedTokens, CollatorForMaskedRandomSelectedTokens
+from data import build_datasets
+from data import CollatorForMaskedSelectedTokens, CollatorForMaskedRandomSelectedTokens, CollatorForMaskedVQA
 from data import ALL_POSSIBLE_COLORS
 from model import MultimodalModel, MultimodalPretrainingModel
 from utils import load_checkpoint
@@ -58,6 +59,16 @@ def build_collate_fns(dataset, config, dont_mask_spheres=False):
         'size':  1 / len(size_tokens),
         'identity':  1 / len(processor.vocabulary),
     }
+    
+    if not config.multimodal_pretraining:
+        vqa_collator = CollatorForMaskedVQA(config, dataset.processor)
+        return {
+            'random_without_testing_spheres': [
+                ('color', vqa_collator),
+                ('shapes', vqa_collator),
+                ('materials', vqa_collator),
+                ('size', vqa_collator),
+        ]}, random_baseline
 
     collate_fns = {
         'selected': [
@@ -102,18 +113,49 @@ def build_loader(dataset, collate_fn):
     return DataLoader(dataset, shuffle=True, collate_fn=collate_fn, **dlkwargs)
 
 
+def build_test_data(config):
+    test_datasets = {}
+    systematic_datasets = {}
+    cmn_systematic_datasets = {}
+    
+    if config.multimodal_pretraining:
+        train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
+        config.pad_idx = train_dataset.pad_idx
+        config.n_tokens = train_dataset.n_tokens
+        
+        property_queries = ['shapes', 'size', 'color', 'materials']
+        test_datasets = {prop: test_dataset for prop in property_queries}
+        systematic_datasets = {prop: systematic_dataset for prop in property_queries}
+        cmn_systematic_datasets = {prop: common_systematic_dataset for prop in property_queries}
+    else:
+        (train_dataset, 
+         test_datasets['all'],
+         test_datasets['shapes'],
+         test_datasets['size'],
+         test_datasets['color'],
+         test_datasets['materials'], 
+         systematic_datasets['all'],
+         systematic_datasets['shapes'],
+         systematic_datasets['size'],
+         systematic_datasets['color'],
+         systematic_datasets['materials'], 
+         cmn_systematic_datasets['all'],
+         cmn_systematic_datasets['shapes'],
+         cmn_systematic_datasets['size'],
+         cmn_systematic_datasets['color'],
+         cmn_systematic_datasets['materials']
+         ) = build_datasets(config)
+        
+        config.pad_idx = train_dataset.pad_idx
+        config.n_tokens = train_dataset.n_tokens
+
+    return train_dataset, test_datasets, systematic_datasets, cmn_systematic_datasets
+
 def compute_performance_results(exp_name):
     checkpoint = load_checkpoint(exp_name)
     config = load_config(exp_name)
 
-    # # workspace_path = ''
-    # config.vocabulary_path = config.vocabulary_path.replace('/workspace1/' ,'/workspace/')
-    # config.base_path = config.base_path.replace('/workspace1/' ,'/workspace/')
-    # # config.vocabulary_path = config.vocabulary_path.replace('/workspace/' ,'/workspace1/')
-    # # config.base_path = config.base_path.replace('/workspace/' ,'/workspace1/')
-
-    train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
-    config.pad_idx = train_dataset.pad_idx
+    train_dataset, test_datasets, systematic_datasets, common_systematic_datasets = build_test_data(config)
 
     training_model = load_training_model(config, checkpoint)
     trainer = Trainer(max_epochs=config.max_epochs,
@@ -127,9 +169,9 @@ def compute_performance_results(exp_name):
         results = {}
         for name, collate_fn in fns_by_category:
             train_loader = build_loader(train_dataset, collate_fn=collate_fn)
-            test_loader = build_loader(test_dataset, collate_fn=collate_fn)
-            systematic_loader = build_loader(systematic_dataset, collate_fn=collate_fn)
-            common_systematic_loader = build_loader(common_systematic_dataset, collate_fn=collate_fn)
+            test_loader = build_loader(test_datasets[name], collate_fn=collate_fn)
+            systematic_loader = build_loader(systematic_datasets[name], collate_fn=collate_fn)
+            common_systematic_loader = build_loader(common_systematic_datasets[name], collate_fn=collate_fn)
 
             test_results = trainer.test(training_model, dataloaders=[test_loader, systematic_loader])
             raw_results = trainer.test(training_model, dataloaders=[train_loader, common_systematic_loader])
@@ -148,25 +190,26 @@ def compute_performance_results(exp_name):
     return all_results
 
 
-def compute_results(exp_name):
+def compute_results(exp_name, only_performance=False):
     all_results = compute_performance_results(exp_name)
 
-    print('Computing NMI Scores')
-    all_results['sampled_nmi_scores'] = compute_nmi(exp_name, use_complete_dataset=False)
-    all_results['nmi_scores'] = compute_nmi(exp_name, use_complete_dataset=True)
+    if not only_performance:
+        print('Computing NMI Scores')
+        all_results['sampled_nmi_scores'] = compute_nmi(exp_name, use_complete_dataset=False)
+        all_results['nmi_scores'] = compute_nmi(exp_name, use_complete_dataset=True)
 
-    print('Computing P-Scores')
-    all_results['p_scores'] = compute_p_score(exp_name)
-    all_results['p_scores_within_task'] = compute_p_score(exp_name, within_task=True)
-    
-    print('Computing P-Scores')
-    all_results['o_scores'] = compute_o_score(exp_name)
-    all_results['o_scores_within_task'] = compute_o_score(exp_name, triplet_within_task=True)
-    all_results['o_scores_within_color_shape'] = compute_o_score(exp_name, triplet_within_color_shape=True)
-    
-    # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
-    print('Computing Probing')
-    all_results['probing_metrics'] = compute_probing(exp_name)
+        print('Computing P-Scores')
+        all_results['p_scores'] = compute_p_score(exp_name)
+        all_results['p_scores_within_task'] = compute_p_score(exp_name, within_task=True)
+        
+        print('Computing O-Scores')
+        all_results['o_scores'] = compute_o_score(exp_name)
+        all_results['o_scores_within_task'] = compute_o_score(exp_name, triplet_within_task=True)
+        all_results['o_scores_within_color_shape'] = compute_o_score(exp_name, triplet_within_color_shape=True)
+        
+        # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
+        print('Computing Probing')
+        all_results['probing_metrics'] = compute_probing(exp_name)
     
     with open(f'outputs/results/{exp_name}.json', 'w') as fp:
         json.dump(all_results, fp)

@@ -22,8 +22,9 @@ def build_model(config):
         print("Creating TextualModel model")
         model = TextualModel(config)
     else:
-        print("Creating Model model")
-        model = Model(config)
+        print("Creating MultimodalModel model")
+        model = MultimodalModel(config)
+        # model = Model(config)
 
     if config.multimodal_pretraining:
         print("Creating MultimodalPretrainingModel training model")
@@ -32,8 +33,10 @@ def build_model(config):
         print("Creating ImageMaskingPretrainingModel training model")
         training_model = ImageMaskingPretrainingModel(model, config)
     else:
-        print("Creating TrainingModel training model")
-        training_model = TrainingModel(model, config)
+        # print("Creating TrainingModel training model")
+        # training_model = TrainingModel(model, config)
+        print("Creating MultimodalPretrainingModel training model")
+        training_model = MultimodalPretrainingModel(model, config)
 
     if config.start_from:
         resume_from_path = f"outputs/{config.start_from}/last.ckpt"
@@ -53,6 +56,9 @@ class TrainingModel(L.LightningModule):
     def set_exp_prefix(self, prefix):
         self.exp_prefix = prefix
 
+    def pack_logging_values(self, metrics, prefix):
+        return {f"{prefix}_{k}": v for k, v in metrics.items()}
+
     def training_step(self, batch, batch_idx):
         if self.config.multimodal_training:
             images, scenes, questions, labels = batch
@@ -68,12 +74,16 @@ class TrainingModel(L.LightningModule):
         count = torch.ones_like(pred).sum().detach()
         acc = correct / count
 
-        values = {"train_loss": loss, "train_acc": acc}  # add more items if needed
+        values = {"loss": loss, "acc": acc}  # add more items if needed
+        values = self.pack_logging_values(values, 'train')
         self.log_dict(values)
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
-        dl_name = ['val', 'systematic_val'][dataloader_idx]
+        dl_name = ['val', 'systematic_val',
+                   'color_val', 'color_systematic_val', 
+                   'shape_val', 'shape_systematic_val', 
+                   'color_common_systematic_val', 'shape_common_systematic_val'][dataloader_idx]
 
         if self.config.multimodal_training:
             images, scenes, questions, labels = batch
@@ -90,12 +100,17 @@ class TrainingModel(L.LightningModule):
         acc = correct / count
 
         test_prefix = f'{self.exp_prefix}_{dl_name}' if self.exp_prefix else dl_name
-        values = {f"{test_prefix}_loss": loss, f"{test_prefix}_acc": acc}  # add more items if needed
+        values = {"loss": loss, "acc": acc}  # add more items if needed
+        
+        values = self.pack_logging_values(values, test_prefix)
         self.log_dict(values, on_epoch=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx, dataloader_idx):
-        dl_name = ['test', 'systematic_test'][dataloader_idx]
-
+        dl_name = ['test', 'systematic_test',
+                   'color_test', 'color_systematic_test',
+                   'shape_test', 'shape_systematic_test',
+                   'color_common_systematic_test', 'shape_common_systematic_test'][dataloader_idx]
+        
         if self.config.multimodal_training:
             images, scenes, questions, labels = batch
             output = self.inner_model(images, scenes, questions)
@@ -111,7 +126,9 @@ class TrainingModel(L.LightningModule):
         acc = correct / count
 
         test_prefix = f'{self.exp_prefix}_{dl_name}' if self.exp_prefix else dl_name
-        values = {f"{test_prefix}_loss": loss, f"{test_prefix}_acc": acc}  # add more items if needed
+        values = {"loss": loss, "acc": acc}  # add more items if needed
+        
+        values = self.pack_logging_values(values, test_prefix)
         self.log_dict(values, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
@@ -499,9 +516,12 @@ class MultimodalModel(nn.Module):
                 nn.LayerNorm(config.d_hidden),
             )
 
-        max_seq_len = config.n_patches + config.max_scene_size
-        if config.multimodal_training:
-            max_seq_len = max_seq_len + config.max_question_size
+        if config.multimodal_pretraining:
+            max_seq_len = config.n_patches + config.max_scene_size
+        else:
+            max_seq_len = config.n_patches + config.max_question_size
+        # if config.multimodal_training:
+        #     max_seq_len = max_seq_len + config.max_question_size
         self.pos_embedding = nn.Parameter(torch.randn(max_seq_len, 1, config.d_hidden))
         self.type_image_embedding = nn.Parameter(torch.randn(1, 1, config.d_hidden))
         self.type_scene_embedding = nn.Parameter(torch.randn(1, 1, config.d_hidden))
@@ -517,16 +537,16 @@ class MultimodalModel(nn.Module):
             vit_embedding.eval()
         return self
 
-    def forward(self, image, scene, question=None):
-        embedded_scene = self.word_embedding(scene).transpose(1,0)
+    def forward(self, image, text):
+        embedded_text = self.word_embedding(text).transpose(1,0)
         embedded_image = self.patch_embedding(image).transpose(1,0)
 
-        embedded_scene = embedded_scene + self.type_scene_embedding
+        embedded_text = embedded_text + self.type_scene_embedding
         embedded_image = embedded_image + self.type_image_embedding
-        combined_embedding = [embedded_image, embedded_scene]
+        combined_embedding = [embedded_image, embedded_text]
 
         i_pad_mask = torch.zeros_like(embedded_image[:,:,0], dtype=torch.bool).transpose(1,0)
-        s_pad_mask = scene == self.config.pad_idx
+        s_pad_mask = text == self.config.pad_idx
         pad_mask = [i_pad_mask, s_pad_mask]
 
         pad_mask = torch.cat(pad_mask, dim=1)
