@@ -155,6 +155,7 @@ class CollatorForMaskedVQA:
         self.non_special_token_idxs = torch.tensor(processor.non_special_token_idxs).long()
         self.mask_token_idx = processor.mask_token_idx
         self.image_patch_sizes = config.patch_height, config.patch_width
+        self.pad_token_idx = processor.pad_token_idx
 
     def __call__(self, batch):
         images, question_answers = default_collate(batch)
@@ -171,7 +172,11 @@ class CollatorForMaskedVQA:
 
     def build_answer_targets(self, inputs):
         labels = inputs.clone()
-        labels[:,:-1] = -100  # We only compute loss on answer token
+        # labels[:,:-1] = -100  # We only compute loss on answer token
+        last_non_padded_indices = (inputs != self.pad_token_idx).sum(dim=-1) - 1
+        answer_indices = (torch.arange(inputs.size(0)), last_non_padded_indices)
+        labels = torch.full_like(inputs, -100)
+        labels[answer_indices] = inputs[answer_indices]
         return inputs, labels
 
 
