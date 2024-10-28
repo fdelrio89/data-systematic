@@ -177,6 +177,7 @@ class CollatorForMaskedVQA:
         answer_indices = (torch.arange(inputs.size(0)), last_non_padded_indices)
         labels = torch.full_like(inputs, -100)
         labels[answer_indices] = inputs[answer_indices]
+        inputs[answer_indices] = self.mask_token_idx
         return inputs, labels
 
 
