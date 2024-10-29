@@ -1,4 +1,5 @@
 from collections import defaultdict
+import math
 import os
 import json
 import h5py
@@ -10,7 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 from torch.utils.data import DataLoader
-from torch.utils.data import Subset, ConcatDataset
+from torch.utils.data import Subset, ConcatDataset, Sampler
 from torchvision.transforms import Compose, Normalize, Resize, ToTensor, ColorJitter
 import lightning as L
 
@@ -36,9 +37,8 @@ def build_datasets(config):
         return CLEVRSplit.build_splits(config)
 
 
-def build_loader(dataset, config, shuffle=True, collate_fn=None):
+def build_loader(dataset, config, shuffle=True, collate_fn=None, episodic_training=False):
     dlkwargs = {
-        'batch_size': config.batch_size,
         'num_workers': int(os.environ.get("SLURM_CPUS_PER_TASK", 4)),
         'pin_memory': torch.cuda.is_available(),
     }
@@ -48,7 +48,18 @@ def build_loader(dataset, config, shuffle=True, collate_fn=None):
         dlkwargs['collate_fn'] = CollatorForMaskedLanguageModeling(
             config, dataset.processor, mlm_probability=config.mlm_probability)
 
-    return DataLoader(dataset, shuffle=shuffle, **dlkwargs)
+    if episodic_training:
+        if isinstance(dataset, CLEVRMultimodalSplit):
+            scenes_or_questions = dataset.scenes
+        elif isinstance(dataset, CLEVRSplit):
+            scenes_or_questions = dataset.questions
+
+        dlkwargs['batch_sampler'] = EpisodicBatchSampler(scenes_or_questions, config.batch_size, shuffle=shuffle)
+    else:
+        dlkwargs['batch_size'] = config.batch_size
+        dlkwargs['shuffle'] = shuffle
+
+    return DataLoader(dataset, **dlkwargs)
 
 
 def build_detailed_test_dataloaders(dataset, config, type_of_tokens_to_test=None):
@@ -93,6 +104,44 @@ class RandomPixelShuffle(object):
         indices = np.random.permutation(height * width)
         shuffled_img = img.view(channels, -1)[:, indices].view(channels, height, width)
         return shuffled_img
+
+
+class EpisodicBatchSampler(Sampler):
+    def __init__(self, scenes_or_questions, batch_size, shuffle=True):
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.ds_len = len(scenes_or_questions)
+        self.samples_by_episode_id = defaultdict(list)
+        for index, s_or_q in enumerate(scenes_or_questions):
+            self.samples_by_episode_id[s_or_q['episode_id']].append(index)
+        
+    def __iter__(self):
+        iter_samples_by_episode_id = {k: v.copy() for k, v in self.samples_by_episode_id.items()}
+        episode_ids = list(iter_samples_by_episode_id.keys())
+        
+        next_batch = []
+        while len(episode_ids) > 0:
+            index_to_sample = random.randrange(len(episode_ids)) if self.shuffle else 0
+            episode_id = episode_ids[index_to_sample]
+
+            sample_indices = iter_samples_by_episode_id[episode_id]
+            if self.shuffle:
+                random.shuffle(sample_indices)
+            
+            num_missing_samples = self.batch_size - len(next_batch)
+            next_batch.extend(
+                [sample_indices.pop(0) for _ in range(num_missing_samples) if len(sample_indices) > 0])
+            
+            if not sample_indices:
+                episode_ids.pop(index_to_sample)
+            
+            if len(next_batch) >= self.batch_size:
+                yield next_batch
+                next_batch = []
+                
+    
+    def __len__(self):
+        return math.ceil(self.ds_len / self.batch_size)
 
 
 class CollatorForMaskedLanguageModeling:

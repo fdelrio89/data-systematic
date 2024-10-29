@@ -144,7 +144,7 @@ def build_data_for_training(config, train_callbacks):
             train_dataset = CurriculumData(train_subsets)
             train_callbacks.append(CurriculumScheduler(train_dataset, config.max_epochs))
 
-        train_loader = build_loader(train_dataset, config, shuffle=True)
+        train_loader = build_loader(train_dataset, config, shuffle=True, episodic_training=config.episodic_training)
         test_loader = build_loader(test_dataset, config, shuffle=False)
         systematic_loader = build_loader(systematic_dataset, config, shuffle=False)
         cmn_systematic_loader = build_loader(cmn_systematic_dataset, config, shuffle=False)
@@ -193,7 +193,8 @@ def build_data_for_training(config, train_callbacks):
 
         vqa_collator = CollatorForMaskedVQA(config, train_dataset.processor)
 
-        train_loader = build_loader(train_dataset, config, shuffle=True, collate_fn=vqa_collator)
+        train_loader = build_loader(
+            train_dataset, config, shuffle=True, collate_fn=vqa_collator, episodic_training=config.episodic_training)
 
         train_data_args = {
             'train_dataloaders': train_loader,

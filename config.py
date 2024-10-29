@@ -112,6 +112,7 @@ def read_args(defaults=False):
     parser.add_argument("--aug_zero_color", action='store_true', default=False)
     parser.add_argument('--token_translation_path', type=str, default='')
     parser.add_argument('--use_curriculum', action='store_true', default=False)
+    parser.add_argument('--episodic_training', action='store_true', default=False)
 
     # Legacy
     parser.add_argument("--n_outputs", type=int, default=28)
