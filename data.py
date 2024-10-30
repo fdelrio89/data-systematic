@@ -1,3 +1,4 @@
+from utils import only_in_amd_cluster
 from collections import defaultdict
 import math
 import os
@@ -6,7 +7,6 @@ import h5py
 import random
 from tqdm.auto import tqdm
 from PIL import Image
-import functools
 import numpy as np
 import torch
 from torch.utils.data import default_collate
@@ -14,6 +14,12 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Subset, ConcatDataset, Sampler
 from torchvision.transforms import Compose, Normalize, Resize, ToTensor, ColorJitter
 import lightning as L
+try:
+    from functools import cache
+except ImportError:
+    from functools import lru_cache
+    cache = lru_cache(maxsize=None)
+
 
 def build_datasets(config):
     if config.multimodal_pretraining:
@@ -38,8 +44,11 @@ def build_datasets(config):
 
 
 def build_loader(dataset, config, shuffle=True, collate_fn=None, episodic_training=False):
+    in_amd_cluster = lambda: os.environ.get('IS_AMD_CLUSTER')
+    cpus_for_task = int(os.environ.get("SLURM_CPUS_PER_TASK", 4))
+    num_workers = cpus_for_task // 4 if in_amd_cluster else cpus_for_task
     dlkwargs = {
-        'num_workers': int(os.environ.get("SLURM_CPUS_PER_TASK", 4)),
+        'num_workers': num_workers,
         'pin_memory': torch.cuda.is_available(),
     }
     if collate_fn:
@@ -509,6 +518,7 @@ class CLEVRSplit:
         with open(questions_path, 'r') as fp:
             self.questions = json.load(fp)['questions']
 
+    @only_in_amd_cluster(cache)
     def retrieve_raw(self, idx):
         question = self.questions[idx]
 
@@ -737,6 +747,7 @@ class CLEVRMultimodalSplit:
         subset.scenes = [subset.scenes[idx]for idx in indices]
         return subset
 
+    @only_in_amd_cluster(cache)
     def retrieve_raw(self, idx):
         scene = self.scenes[idx]
 

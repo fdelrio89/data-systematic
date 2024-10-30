@@ -5,6 +5,8 @@ import os
 import comet_ml
 import torch
 
+torch.set_float32_matmul_precision('medium')
+
 import lightning as L
 from lightning import Trainer, seed_everything
 from lightning.pytorch.loggers.comet import CometLogger

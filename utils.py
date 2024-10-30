@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import torch
 
@@ -13,3 +14,12 @@ def load_checkpoint(exp_name, epoch=None):
     
     checkpoint = torch.load(resume_from_path)
     return checkpoint
+
+def only_in_amd_cluster(dec):
+    in_amd_cluster = lambda: os.environ.get('IS_AMD_CLUSTER')
+    def decorator(func):
+        if not in_amd_cluster():
+            # Return the function unchanged, not decorated.
+            return func
+        return dec(func)
+    return decorator
