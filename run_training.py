@@ -5,7 +5,9 @@ import os
 import comet_ml
 import torch
 
-torch.set_float32_matmul_precision('medium')
+in_amd_cluster = lambda: os.environ.get('IS_AMD_CLUSTER')
+if in_amd_cluster():
+    torch.set_float32_matmul_precision('medium')
 
 import lightning as L
 from lightning import Trainer, seed_everything
@@ -71,7 +73,7 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
         loggers.append(wandb_logger)
 
     if log_to_csv():
-        output_path = f"outputs/{experiment_name}/"
+        output_path = f"{config.outputs_path}/{experiment_name}/"
         csv_logger = CSVLogger(
             output_path,
             name='restults.csv'
@@ -254,7 +256,7 @@ def main(config):
 
     training_model = build_model(config)
 
-    checkpoint_path = f"outputs/{experiment_name}/"
+    checkpoint_path = f"{config.outputs_path}/{experiment_name}/"
     resume_from_path = None
     if config.resume_training:
         resume_from_path = f'{checkpoint_path}/last.ckpt'
