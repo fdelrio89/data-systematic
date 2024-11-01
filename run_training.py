@@ -40,10 +40,11 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
     if not os.path.exists(checkpoint_path):
         os.makedirs(checkpoint_path, exist_ok=True)
     save_top_k = -1
+    every_n_epochs = 50 if config.multimodal_pretraining else 5
     callbacks.append(ModelCheckpoint(dirpath=checkpoint_path,
                                      save_top_k=save_top_k,
                                      monitor="val_loss/dataloader_idx_0",
-                                     every_n_epochs=50,
+                                     every_n_epochs=every_n_epochs,
                                      save_last=True))
     # if config.use_curriculum:
     #     schedule = [tuple(range(3,i+1)) for i in range(3,10)] + [(0,)] # 3 to 10 ojects
