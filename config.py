@@ -29,10 +29,14 @@ def load_config(experiment_name=""):
         config, parser = read_args(defaults=True)
     else:
         config, parser = read_args()
-    if not config.resume_training and not experiment_name:
+
+    should_load_config = config.resume_training or experiment_name
+    if not should_load_config:
         return config
 
-    experiment_name = os.environ.get("EXP_NAME", experiment_name)
+    if not experiment_name:
+        # experiment_name = os.environ.get("EXP_NAME", experiment_name)
+        experiment_name = config.experiment_name
 
     to_clean_int = lambda str_: ''.join(filter(str.isdigit, str_))
     get_version = lambda p: int(to_clean_int(p.stem)) if to_clean_int(p.stem) else 0
@@ -64,6 +68,7 @@ def load_config(experiment_name=""):
 def read_args(defaults=False):
     parser = ArgumentParser()
 
+    parser.add_argument("--experiment_name", type=str, default='default')
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0')
     parser.add_argument("--comet_experiment_key", type=str, default=None)

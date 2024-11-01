@@ -243,7 +243,8 @@ def main(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")
 
-    experiment_name = os.environ.get("EXP_NAME", "default")
+    # experiment_name = os.environ.get("EXP_NAME", "default")
+    experiment_name = config.experiment_name
     train_callbacks = []
     (train_data_args,
      test_data_args,
@@ -284,5 +285,5 @@ def main(config):
 if __name__ == "__main__":
     config = load_config()
     main(config)
-    experiment_name = os.environ.get("EXP_NAME", "default")
-    compute_results(experiment_name, only_performance=(not config.multimodal_pretraining))
+    # experiment_name = os.environ.get("EXP_NAME", "default")
+    compute_results(config.experiment_name, only_performance=(not config.multimodal_pretraining))
