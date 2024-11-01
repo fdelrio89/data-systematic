@@ -192,6 +192,7 @@ def build_data_for_training(config, train_callbacks):
          cmn_systematic_datasets['color'],
          cmn_systematic_datasets['material']
          ) = build_datasets(config)
+        update_config_with_data(config, train_dataset)
 
         vqa_collator = CollatorForMaskedVQA(config, train_dataset.processor)
 

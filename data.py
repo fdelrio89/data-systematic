@@ -620,7 +620,7 @@ class CLEVRProcessor:
         self.image_transform = image_transform
         
         self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
-        self.base_n_tokens = len(self.vocabulary)        
+        self.base_n_tokens = len(self.vocabulary)
         # self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
         
         self.non_special_tokens = [t for t in self.vocabulary if t not in self.special_tokens]
