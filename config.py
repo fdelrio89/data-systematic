@@ -1,3 +1,5 @@
+from utils import in_amd_cluster
+
 from argparse import ArgumentParser
 import os
 from pathlib import Path
@@ -41,7 +43,8 @@ def load_config(experiment_name=""):
     to_clean_int = lambda str_: ''.join(filter(str.isdigit, str_))
     get_version = lambda p: int(to_clean_int(p.stem)) if to_clean_int(p.stem) else 0
 
-    checkpoint_paths = sorted(Path(f'outputs/{experiment_name}/').glob('last*.ckpt'), key=get_version, reverse=True)
+    checkpoint_paths = Path(f'{config.outputs_path}/{experiment_name}/').glob('last*.ckpt')
+    checkpoint_paths = sorted(checkpoint_paths, key=get_version, reverse=True)
     checkpoint_path = str(checkpoint_paths[0])
     # checkpoint_path = f"outputs/{experiment_name}/last.ckpt"
 
@@ -178,7 +181,8 @@ def get_workspace():
 def load_config_from_checkpoint(checkpoint_path):
     checkpoint = torch.load(checkpoint_path)
     config = checkpoint['hyper_parameters']['config']
-    adapt_workspace_dir(config)
+    if not in_amd_cluster():
+        adapt_workspace_dir(config)
     return config
 
 

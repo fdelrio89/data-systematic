@@ -519,6 +519,10 @@ class CLEVRSplit:
             self.questions = json.load(fp)['questions']
 
     @only_in_amd_cluster(cache)
+    def load_image(self, image_filename):
+        image_path = f'{self.images_dir}/{image_filename}'
+        return Image.open(image_path).convert('RGB')
+
     def retrieve_raw(self, idx):
         question = self.questions[idx]
 
@@ -526,8 +530,7 @@ class CLEVRSplit:
         answer_str = question['answer']
         image_filename = question['image_filename']
 
-        image_path = f'{self.images_dir}/{image_filename}'
-        image = Image.open(image_path).convert('RGB')
+        image = self.load_image(image_filename)
 
         return image, question_str, answer_str
     
@@ -748,13 +751,15 @@ class CLEVRMultimodalSplit:
         return subset
 
     @only_in_amd_cluster(cache)
+    def load_image(self, image_filename):
+        image_path = f'{self.images_dir}/{image_filename}'
+        return Image.open(image_path).convert('RGB')
+    
     def retrieve_raw(self, idx):
         scene = self.scenes[idx]
 
         image_filename = scene['image_filename']
-
-        image_path = f'{self.images_dir}/{image_filename}'
-        image = Image.open(image_path).convert('RGB')
+        image = self.load_image(image_filename)
 
         return image, scene
 

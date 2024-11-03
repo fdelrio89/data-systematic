@@ -16,10 +16,13 @@ def load_checkpoint(exp_name, epoch=None):
     return checkpoint
 
 def only_in_amd_cluster(dec):
-    in_amd_cluster = lambda: os.environ.get('IS_AMD_CLUSTER')
     def decorator(func):
         if not in_amd_cluster():
             # Return the function unchanged, not decorated.
             return func
         return dec(func)
     return decorator
+
+
+def in_amd_cluster():
+    return bool(os.environ.get('IS_AMD_CLUSTER'))
