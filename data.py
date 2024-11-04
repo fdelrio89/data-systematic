@@ -813,6 +813,7 @@ class CLEVRMultimodalSplit:
             if config.trainset_subset < 1. and split == train_split:
                 len_ = len(dataset)
                 k = int(config.trainset_subset * len_)
+                random.seed(config.seed + k)
                 indices = sorted(random.sample(list(range(len_)), k=k))
                 dataset = ResponsiveSubset(dataset, indices)
                 print(f'Creating subset of training set of N={len(dataset)}')
