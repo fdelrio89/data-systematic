@@ -4,6 +4,7 @@ import os
 
 import comet_ml
 import torch
+import wandb
 
 in_amd_cluster = lambda: os.environ.get('IS_AMD_CLUSTER')
 if in_amd_cluster():
@@ -64,14 +65,18 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
         loggers.append(comet_logger)
 
     if log_to_wandb():
-        wandb_logger = WandbLogger(
-            project='systematic-text-representation',
-            name=experiment_name,
-            version=config.wandb_experiment_id,
-        )
-        wandb_logger.log_hyperparams(vars(config))
-        config.wandb_experiment_id = wandb_logger.version
-        loggers.append(wandb_logger)
+        try:
+            wandb_logger = WandbLogger(
+                project='systematic-text-representation',
+                name=experiment_name,
+                version=config.wandb_experiment_id,
+            )
+            wandb_logger.log_hyperparams(vars(config))
+            config.wandb_experiment_id = wandb_logger.version
+            loggers.append(wandb_logger)
+        except wandb.errors.errors.CommError as e:
+            print(e)
+            pass
 
     if log_to_csv():
         output_path = f"{config.outputs_path}/{experiment_name}/"
@@ -290,4 +295,5 @@ if __name__ == "__main__":
     config = load_config()
     main(config)
     # experiment_name = os.environ.get("EXP_NAME", "default")
+    print('Computing Results...')
     compute_results(config.experiment_name, only_performance=(not config.multimodal_pretraining))

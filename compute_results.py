@@ -191,6 +191,7 @@ def compute_performance_results(exp_name):
 
 
 def compute_results(exp_name, only_performance=False):
+    print('Computing Performance Results')
     all_results = compute_performance_results(exp_name)
 
     if not only_performance:

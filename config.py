@@ -43,6 +43,7 @@ def load_config(experiment_name=""):
     to_clean_int = lambda str_: ''.join(filter(str.isdigit, str_))
     get_version = lambda p: int(to_clean_int(p.stem)) if to_clean_int(p.stem) else 0
 
+    config.outputs_path = os.environ.get('OUTPUTS_PATH', config.outputs_path)
     checkpoint_paths = Path(f'{config.outputs_path}/{experiment_name}/').glob('last*.ckpt')
     checkpoint_paths = sorted(checkpoint_paths, key=get_version, reverse=True)
     checkpoint_path = str(checkpoint_paths[0])
