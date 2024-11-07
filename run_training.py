@@ -122,14 +122,18 @@ def build_tester(config, experiment_name):
         loggers.append(comet_logger)
 
     if log_to_wandb():
-        wandb_logger = WandbLogger(
-            project='systematic-text-representation',
-            name=experiment_name,
-            version=config.wandb_experiment_id,
-        )
-        # wandb_logger.log_hyperparams(vars(config))
-        config.wandb_experiment_id = wandb_logger.version
-        loggers.append(wandb_logger)
+        try:
+            wandb_logger = WandbLogger(
+                project='systematic-text-representation',
+                name=experiment_name,
+                version=config.wandb_experiment_id,
+            )
+            # wandb_logger.log_hyperparams(vars(config))
+            config.wandb_experiment_id = wandb_logger.version
+            loggers.append(wandb_logger)
+        except wandb.errors.errors.CommError as e:
+            print(e)
+            pass
 
     print(f'Working with: {torch.cuda.device_count()} GPU')
     return Trainer(max_epochs=config.max_epochs,
