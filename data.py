@@ -1,4 +1,5 @@
 from utils import only_in_amd_cluster
+import copy
 from collections import defaultdict
 import math
 import os
@@ -779,6 +780,21 @@ class CLEVRMultimodalSplit:
     def __len__(self):
         return len(self.scenes)
 
+    @staticmethod
+    def build_image_transform(config, train=True):
+        image_transform = [ToTensor(), Resize((224,224))]
+        if train and config.color_jitter:
+            image_transform.append(ColorJitter(
+                brightness=config.color_jitter_brightness, hue=config.color_jitter_hue,
+                saturation=config.color_jitter_saturation, contrast=config.color_jitter_contrast,
+                ))
+        if not config.not_normalize_image:
+            image_transform.append(Normalize(0.5, 1))
+        if config.permute_pixels:
+            image_transform.append(RandomPixelShuffle())
+        image_transform = Compose(image_transform)
+        return image_transform
+
     @classmethod
     def build_splits(cls, config):
         train_split = 'trainA'
@@ -786,38 +802,35 @@ class CLEVRMultimodalSplit:
         test_split = 'valB'
         # common_test_split = 'valB'
         common_test_split = 'valC'
-        processor = None
 
-        for split in [train_split, val_split, test_split, common_test_split]:
+        split = train_split
+
+        scenes_path = f'{config.base_path}/scenes/CLEVR_{split}_scenes.json'
+        images_dir = f'{config.base_path}/images/{split}'
+
+        train_processor = CLEVRMultimodalProcessor(dataset, config, image_transform=train_image_transform)
+
+        dataset = cls(scenes_path, images_dir, processor=train_processor)
+        train_image_transform = cls.build_image_transform(config, train=True)
+
+        if config.trainset_subset < 1.:
+            len_ = len(dataset)
+            k = int(config.trainset_subset * len_)
+            random.seed(config.seed + k)
+            indices = sorted(random.sample(list(range(len_)), k=k))
+            dataset = ResponsiveSubset(dataset, indices)
+            print(f'Creating subset of training set of N={len(dataset)}')
+
+        yield dataset
+
+        for split in [val_split, test_split, common_test_split]:
             scenes_path = f'{config.base_path}/scenes/CLEVR_{split}_scenes.json'
             images_dir = f'{config.base_path}/images/{split}'
 
-            if processor:
-                dataset = cls(scenes_path, images_dir, processor=processor)
-            else:
-                dataset = cls(scenes_path, images_dir)
-                image_transform = [ToTensor(), Resize((224,224))]
-                if config.color_jitter:
-                    image_transform.append(ColorJitter(
-                        brightness=config.color_jitter_brightness, hue=config.color_jitter_hue,
-                        saturation=config.color_jitter_saturation, contrast=config.color_jitter_contrast,
-                        ))
-                if not config.not_normalize_image:
-                    image_transform.append(Normalize(0.5, 1))
-                if config.permute_pixels:
-                    image_transform.append(RandomPixelShuffle())
-                image_transform = Compose(image_transform)
-                processor = CLEVRMultimodalProcessor(dataset, config, image_transform=image_transform)
-                dataset.processor = processor
-                
-            if config.trainset_subset < 1. and split == train_split:
-                len_ = len(dataset)
-                k = int(config.trainset_subset * len_)
-                random.seed(config.seed + k)
-                indices = sorted(random.sample(list(range(len_)), k=k))
-                dataset = ResponsiveSubset(dataset, indices)
-                print(f'Creating subset of training set of N={len(dataset)}')
-                
+            test_processor = copy.deepcopy(train_processor)
+            test_processor.image_transform = cls.build_image_transform(config, train=False)
+            dataset = cls(scenes_path, images_dir, processor=test_processor)
+
             yield dataset
 
 
@@ -888,7 +901,7 @@ class CLEVRMultimodalFromFeaturesSplit:
                 indices = sorted(random.sample(list(range(len_)), k=k))
                 dataset = ResponsiveSubset(dataset, indices)
                 print(f'Creating subset of training set of N={len(dataset)}')
-            
+
             yield dataset
 
 
