@@ -12,7 +12,7 @@ def load_checkpoint(exp_name, epoch=None):
     else:
         checkpoint_paths = sorted(Path(f'{outputs_dir}/{exp_name}/').glob('last*.ckpt'), key=get_version, reverse=True)
         resume_from_path = str(checkpoint_paths[0])
-    
+
     checkpoint = torch.load(resume_from_path)
     return checkpoint
 

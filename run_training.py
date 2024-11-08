@@ -87,6 +87,9 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
         csv_logger.log_hyperparams(vars(config))
         loggers.append(csv_logger)
 
+    base_val_checks = 10 if config.multimodal_pretraining else 1
+    check_val_every_n_epoch = int(base_val_checks / config.trainset_subset)
+
     reload_dataloaders_every_n_epochs = 1 if config.use_curriculum else 0
     print(f'Working with: {torch.cuda.device_count()} GPUs')
     if torch.cuda.device_count() > 1:
@@ -97,6 +100,7 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
                        precision="16",
                        logger=loggers,
                        callbacks=callbacks,
+                       check_val_every_n_epoch=check_val_every_n_epoch,
                        reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs)
 
     else:
@@ -106,6 +110,7 @@ def build_trainer(config, experiment_name, checkpoint_path, callbacks=None):
                        precision="16",
                        logger=loggers,
                        callbacks=callbacks,
+                       check_val_every_n_epoch=check_val_every_n_epoch,
                        reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs)
 
 def build_tester(config, experiment_name):
@@ -181,6 +186,10 @@ def build_data_for_training(config, train_callbacks):
             'dataloaders': [test_loader, systematic_loader, cmn_systematic_loader],
         }
 
+        print('train_dataset size = ', len(train_dataset))
+        print('batch_size size    = ', config.batch_size)
+        print('train_loader size  = ', len(train_loader))
+
         return train_data_args, test_data_args, test_detailed_loaders, systematic_detailed_loaders
 
     else:
@@ -210,6 +219,10 @@ def build_data_for_training(config, train_callbacks):
 
         train_loader = build_loader(
             train_dataset, config, shuffle=True, collate_fn=vqa_collator, episodic_training=config.episodic_training)
+
+        print('train_dataset size = ', len(train_dataset))
+        print('batch_size size    = ', config.batch_size)
+        print('train_loader size  = ', len(train_loader))
 
         train_data_args = {
             'train_dataloaders': train_loader,
