@@ -75,6 +75,8 @@ def read_args(defaults=False):
     parser.add_argument("--experiment_name", type=str, default='default')
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0')
+    parser.add_argument("--mixture_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0')
+    parser.add_argument("--p_mixture", type=float, default=0.)
     parser.add_argument("--outputs_path", type=str, default='./outputs')
     parser.add_argument("--comet_experiment_key", type=str, default=None)
     parser.add_argument("--wandb_experiment_id", type=str, default=None)

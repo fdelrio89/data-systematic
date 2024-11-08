@@ -814,11 +814,24 @@ class CLEVRMultimodalSplit:
         train_processor = CLEVRMultimodalProcessor(dataset, config, image_transform=train_image_transform)
         dataset.processor = train_processor
 
-        if config.trainset_subset < 1.:
-            len_ = len(dataset)
-            k = int(config.trainset_subset * len_)
+        if config.mixture_path and config.p_mixture > 0:
+            mixture_scenes_path = f'{config.mixture_path}/scenes/CLEVR_{split}_scenes.json'
+            mixture_images_dir = f'{config.mixture_path}/images/{split}'
+            mixture_dataset = cls(mixture_scenes_path, mixture_images_dir, processor=train_processor)
+
+            k = int(config.p_mixture * len(dataset))
             random.seed(config.seed + k)
-            indices = sorted(random.sample(list(range(len_)), k=k))
+            indices = sorted(random.sample(list(range(len(dataset))), k=k))
+            indices_set = set(indices)
+            mixture_dataset = ResponsiveSubset(mixture_dataset, indices)
+            complemented_indices = [i for i in range(len(dataset)) if i not in indices_set]
+            dataset = ResponsiveSubset(dataset, complemented_indices)
+            dataset = ResponsiveConcatDataset([dataset, mixture_dataset])
+
+        if config.trainset_subset < 1.:
+            k = int(config.trainset_subset * len(dataset))
+            random.seed(config.seed + k)
+            indices = sorted(random.sample(list(range(len(dataset))), k=k))
             dataset = ResponsiveSubset(dataset, indices)
             print(f'Creating subset of training set of N={len(dataset)}')
 
