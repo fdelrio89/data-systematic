@@ -124,11 +124,11 @@ class EpisodicBatchSampler(Sampler):
         self.samples_by_episode_id = defaultdict(list)
         for index, s_or_q in enumerate(scenes_or_questions):
             self.samples_by_episode_id[s_or_q['episode_id']].append(index)
-        
+
     def __iter__(self):
         iter_samples_by_episode_id = {k: v.copy() for k, v in self.samples_by_episode_id.items()}
         episode_ids = list(iter_samples_by_episode_id.keys())
-        
+
         next_batch = []
         while len(episode_ids) > 0:
             index_to_sample = random.randrange(len(episode_ids)) if self.shuffle else 0
@@ -137,19 +137,19 @@ class EpisodicBatchSampler(Sampler):
             sample_indices = iter_samples_by_episode_id[episode_id]
             if self.shuffle:
                 random.shuffle(sample_indices)
-            
+
             num_missing_samples = self.batch_size - len(next_batch)
             next_batch.extend(
                 [sample_indices.pop(0) for _ in range(num_missing_samples) if len(sample_indices) > 0])
-            
+
             if not sample_indices:
                 episode_ids.pop(index_to_sample)
-            
+
             if len(next_batch) >= self.batch_size:
                 yield next_batch
                 next_batch = []
-                
-    
+
+
     def __len__(self):
         return math.ceil(self.ds_len / self.batch_size)
 
@@ -272,7 +272,7 @@ class CollatorForMaskedSelectedTokens:
                            torch.roll(sphere_token_mask, shifts=-1, dims=1) |
                            sphere_token_mask)
             masked_indices = masked_indices & ~sphere_mask
-            
+
         labels[~masked_indices] = -100
         inputs[masked_indices] = self.mask_token_idx
 
@@ -314,7 +314,7 @@ class CollatorForMaskedRandomSelectedTokens:
                            torch.roll(sphere_token_mask, shifts=-1, dims=1) |
                            sphere_token_mask)
             masked_indices = masked_indices & ~sphere_mask
-            
+
         labels[~masked_indices] = -100
         inputs[masked_indices] = self.mask_token_idx
 
@@ -364,7 +364,7 @@ def build_common_colors_subset(dataset, config):
     for cut in CUTS:
         indices = np.argwhere(cmn_colors_in_image >= cut)[:,0].tolist()
         subsets.append(Subset(dataset, indices))
-        
+
     return subsets
 
 
@@ -374,15 +374,15 @@ class CurriculumData:
         self.step = 0
         self.train_subsets = train_subsets
 
-    @property 
+    @property
     def processor(self):
         return self.current_subset.dataset.processor
-        
-    @property 
+
+    @property
     def n_steps(self):
         return len(self.train_subsets)
 
-    @property 
+    @property
     def current_subset(self):
         return self.train_subsets[self.step]
 
@@ -436,8 +436,8 @@ class NObjectsCurriculumScheduler(L.Callback):
     def on_train_epoch_end(self, trainer, model):
         # print('CurriculumScheduler.on_train_epoch_end')
         self._prepare_epoch(trainer, model, trainer.current_epoch + 1)
- 
-      
+
+
 class NObjectsCurriculumData(L.LightningDataModule):
     def __init__(self, config):
         super().__init__()
@@ -534,7 +534,7 @@ class CLEVRSplit:
         image = self.load_image(image_filename)
 
         return image, question_str, answer_str
-    
+
     def __getitem__(self, idx):
         image, question, answer = self.retrieve_raw(idx)
         image, question_answer = self.processor(image, question, answer)
@@ -566,9 +566,9 @@ class CLEVRSplit:
         property_queries = ['shape', 'size', 'color', 'material']
 
         questions_path = f'{config.base_path}/questions/CLEVR_{train_split}_questions.json'
-        images_dir = f'{config.base_path}/images/{train_split}'     
+        images_dir = f'{config.base_path}/images/{train_split}'
         train_dataset = cls(questions_path, images_dir)
-        
+
         image_transform = [ToTensor(), Resize((224,224))]
         if config.color_jitter:
             image_transform.append(ColorJitter(
@@ -587,14 +587,14 @@ class CLEVRSplit:
             assert False, "Subset Not Yet Implemented"
 
         yield train_dataset
-        
+
         for split in [val_split, test_split, common_test_split]:
             test_datasets = []
             for property_query in property_queries:
                 questions_path = f'{config.base_path}/questions/CLEVR_{split}_{property_query}_questions.json'
                 images_dir = f'{config.base_path}/images/{split}'
                 test_datasets.append(cls(questions_path, images_dir, processor=processor))
-                       
+
             yield ResponsiveConcatDataset(test_datasets)
             yield from test_datasets
 
@@ -622,11 +622,11 @@ class CLEVRProcessor:
         # self.special_tokens = ['[CLS]', '[PAD]', '[SEP]', '[MASK]']
         self.special_tokens = ['[CLS]', '[PAD]', '[SEP]']
         self.image_transform = image_transform
-        
+
         self.vocabulary, self.inv_vocabulary = self.load_or_build_vocabulary(config, dataset)
         self.base_n_tokens = len(self.vocabulary)
         # self.answers_index, self.inv_answers_index = self.build_answers_index(dataset)
-        
+
         self.non_special_tokens = [t for t in self.vocabulary if t not in self.special_tokens]
         self.special_token_idxs = [self.to_token_idx(t) for t in self.special_tokens]
         self.special_token_idxs_t = torch.tensor(self.special_token_idxs)
@@ -656,7 +656,7 @@ class CLEVRProcessor:
 
     def build_vocabulary(self, dataset):
         vocabulary = set()
-        
+
         print('Building vocabulary')
         for question_str, _ in tqdm(dataset.iter_qa(), total=len(dataset)):
             vocabulary.update(self.tokenize(question_str))
@@ -755,7 +755,7 @@ class CLEVRMultimodalSplit:
     def load_image(self, image_filename):
         image_path = f'{self.images_dir}/{image_filename}'
         return Image.open(image_path).convert('RGB')
-    
+
     def retrieve_raw(self, idx):
         scene = self.scenes[idx]
 
@@ -808,10 +808,11 @@ class CLEVRMultimodalSplit:
         scenes_path = f'{config.base_path}/scenes/CLEVR_{split}_scenes.json'
         images_dir = f'{config.base_path}/images/{split}'
 
-        train_processor = CLEVRMultimodalProcessor(dataset, config, image_transform=train_image_transform)
 
-        dataset = cls(scenes_path, images_dir, processor=train_processor)
+        dataset = cls(scenes_path, images_dir)
         train_image_transform = cls.build_image_transform(config, train=True)
+        train_processor = CLEVRMultimodalProcessor(dataset, config, image_transform=train_image_transform)
+        dataset.processor = train_processor
 
         if config.trainset_subset < 1.:
             len_ = len(dataset)
@@ -1103,7 +1104,7 @@ class CLEVRMultimodalProcessor:
         if self.image_transform:
             image = self.image_transform(image)
         return image
-            
+
     def process_scene(self, scene):
         scene_str = Scene.from_dict(scene,
                                     shuffle_relations=True,
@@ -1117,16 +1118,16 @@ class CLEVRMultimodalProcessor:
             scene_str, self.max_scene_size, self.pad_scenes, lower=False)
         tokenized_scene = torch.tensor(tokenized_scene).long()
         if self.aug_zero > 1:
-            tokenized_scene = self.virtual_augment_scene(tokenized_scene)    
-        
+            tokenized_scene = self.virtual_augment_scene(tokenized_scene)
+
         return tokenized_scene
-    
+
     @property
     def n_tokens(self):
         if self.aug_zero_color:
             return self.base_n_tokens + (self.aug_zero-1)*self.n_color_tokens
         return self.aug_zero*self.base_n_tokens
-    
+
     def virtual_augment_scene(self, tokenized_scene):
         if self.aug_zero_color:
             tokens_not_to_augment = torch.isin(tokenized_scene, self.special_token_idxs_t)
@@ -1138,22 +1139,22 @@ class CLEVRMultimodalProcessor:
             aug_offset_vocab = torch.randint_like(tokenized_scene, 0, self.aug_zero)
         else:
             aug_offset_vocab = random.randint(0, self.aug_zero-1)
-        
+
         if self.aug_zero_color:
             new_vocab_start = self.base_n_tokens - self.min_color_idx
             aug_offset = new_vocab_start + (aug_offset_vocab-1)*self.n_color_tokens
             if self.aug_zero_independent:
-                aug_offset[aug_offset_vocab == 0] = 0  
+                aug_offset[aug_offset_vocab == 0] = 0
             else:
                 aug_offset = 0 if aug_offset_vocab == 0 else aug_offset
         else:
             aug_offset = self.base_n_tokens * aug_offset_vocab
-        
+
         augmented_scene = tokenized_scene + aug_offset
         augmented_scene[tokens_not_to_augment] = tokenized_scene[tokens_not_to_augment]
-        
+
         return augmented_scene
-    
+
     def process_answer(self, question):
         answer_str = question['answer']
         answer_idx = self.answers_index[answer_str]
