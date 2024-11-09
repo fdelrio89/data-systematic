@@ -107,6 +107,9 @@ class ResponsiveConcatDataset(ConcatDataset):
     def __getattr__(self, attr):
         return getattr(self.datasets[0], attr)
 
+    def __getitems__(self, indices):
+        return [self[idx] for idx in indices]
+
 
 class RandomPixelShuffle(object):
     def __call__(self, img):
