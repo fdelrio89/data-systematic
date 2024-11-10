@@ -59,7 +59,7 @@ def build_collate_fns(dataset, config, dont_mask_spheres=False):
         'size':  1 / len(size_tokens),
         'identity':  1 / len(processor.vocabulary),
     }
-    
+
     if not config.multimodal_pretraining:
         vqa_collator = CollatorForMaskedVQA(config, dataset.processor)
         return {
@@ -117,35 +117,35 @@ def build_test_data(config):
     test_datasets = {}
     systematic_datasets = {}
     cmn_systematic_datasets = {}
-    
+
     if config.multimodal_pretraining:
         train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
         config.pad_idx = train_dataset.pad_idx
         config.n_tokens = train_dataset.n_tokens
-        
+
         property_queries = ['shapes', 'size', 'color', 'materials']
         test_datasets = {prop: test_dataset for prop in property_queries}
         systematic_datasets = {prop: systematic_dataset for prop in property_queries}
         cmn_systematic_datasets = {prop: common_systematic_dataset for prop in property_queries}
     else:
-        (train_dataset, 
+        (train_dataset,
          test_datasets['all'],
          test_datasets['shapes'],
          test_datasets['size'],
          test_datasets['color'],
-         test_datasets['materials'], 
+         test_datasets['materials'],
          systematic_datasets['all'],
          systematic_datasets['shapes'],
          systematic_datasets['size'],
          systematic_datasets['color'],
-         systematic_datasets['materials'], 
+         systematic_datasets['materials'],
          cmn_systematic_datasets['all'],
          cmn_systematic_datasets['shapes'],
          cmn_systematic_datasets['size'],
          cmn_systematic_datasets['color'],
          cmn_systematic_datasets['materials']
          ) = build_datasets(config)
-        
+
         config.pad_idx = train_dataset.pad_idx
         config.n_tokens = train_dataset.n_tokens
 
@@ -182,11 +182,11 @@ def compute_performance_results(exp_name):
             results[name] = test_results + train_results + common_results
 
         all_results[type_] = results
-        
+
 
     all_results['config'] = vars(config)
     all_results['random_baseline'] = random_baseline
-        
+
     return all_results
 
 
@@ -202,16 +202,16 @@ def compute_results(exp_name, only_performance=False):
         print('Computing P-Scores')
         all_results['p_scores'] = compute_p_score(exp_name)
         all_results['p_scores_within_task'] = compute_p_score(exp_name, within_task=True)
-        
-        print('Computing O-Scores')
-        all_results['o_scores'] = compute_o_score(exp_name)
-        all_results['o_scores_within_task'] = compute_o_score(exp_name, triplet_within_task=True)
-        all_results['o_scores_within_color_shape'] = compute_o_score(exp_name, triplet_within_color_shape=True)
-        
-        # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
-        print('Computing Probing')
-        all_results['probing_metrics'] = compute_probing(exp_name)
-    
+
+        # print('Computing O-Scores')
+        # all_results['o_scores'] = compute_o_score(exp_name)
+        # all_results['o_scores_within_task'] = compute_o_score(exp_name, triplet_within_task=True)
+        # all_results['o_scores_within_color_shape'] = compute_o_score(exp_name, triplet_within_color_shape=True)
+
+        # # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
+        # print('Computing Probing')
+        # all_results['probing_metrics'] = compute_probing(exp_name)
+
     with open(f'outputs/results/{exp_name}.json', 'w') as fp:
         json.dump(all_results, fp)
 
@@ -240,10 +240,10 @@ def update_results_without_spheres(exp_name):
             all_results = json.load(fp)
     except FileNotFoundError as e:
         all_results = {}
-        
+
     if 'random_without_testing_spheres' in all_results:
         return
-    
+
     collate_fns, random_baseline = build_collate_fns(train_dataset, config, dont_mask_spheres=True)
     new_collate_fns = {}
     new_collate_fns['random_without_testing_spheres'] = collate_fns['random']
@@ -268,13 +268,13 @@ def update_results_without_spheres(exp_name):
     print(f'Storing {exp_name} new updated results with: "random_without_testing_spheres"')
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-        
+
 def update_results_with_permuted_pixels(exp_name):
     checkpoint = load_checkpoint(exp_name)
     config = load_config(exp_name)
-    
+
     config.permute_pixels = True
 
     # workspace_path = ''
@@ -295,9 +295,9 @@ def update_results_with_permuted_pixels(exp_name):
             all_results = json.load(fp)
     except FileNotFoundError as e:
         all_results = {}
-    
+
     collate_fns, random_baseline = build_collate_fns(train_dataset, config)
-    
+
     new_collate_fns = {}
     new_collate_fns['permuted_pixels'] = collate_fns['random']
     for type_, fns_by_category in new_collate_fns.items():
@@ -320,13 +320,13 @@ def update_results_with_permuted_pixels(exp_name):
 
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
 
 
 def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
     print(f'Computing NMIS Scores for {exp_name} (use_complete_dataset={use_complete_dataset})')
-    
+
     n_samples = 5_000
 
     config = load_config(exp_name)
@@ -345,7 +345,7 @@ def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
         indexes = random.sample(list(range(len(train_dataset))), k=n_samples)
         train_subset = Subset(train_dataset, indexes)
         data_to_iterate = train_subset
-        
+
     loader = DataLoader(
         data_to_iterate, batch_size=64, num_workers=int(os.environ.get("SLURM_CPUS_PER_TASK", 4)))
 
@@ -358,12 +358,12 @@ def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
         colors = scene[:,1:][:,1::5]
         materials = scene[:,1:][:,2::5]
         shapes = scene[:,1:][:,3::5]
-        
+
         sizes = sizes[sizes != pad_idx].numpy()
         colors = colors[colors != pad_idx].numpy()
         materials = materials[materials != pad_idx].numpy()
         shapes = shapes[shapes != pad_idx].numpy()
-        
+
         all_sizes.append(sizes)
         all_colors.append(colors)
         all_materials.append(materials)
@@ -384,22 +384,22 @@ def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
 
     if not store_result:
         return all_nmi_scores
-        
+
     with open(f'outputs/results/{exp_name}.json') as fp:
         all_results = json.load(fp)
-    
+
     k_name = 'nmi_scores' if use_complete_dataset else 'sampled_nmi_scores'
     all_results[k_name] = all_nmi_scores
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
 
 
 def compute_correlation(exp_name, use_complete_dataset=True, store_result=False):
     assert False, "Not implemented"
     print(f'Computing NMIS Scores for {exp_name} (use_complete_dataset={use_complete_dataset})')
-    
+
     n_samples = 5_000
 
     config = load_config(exp_name)
@@ -418,7 +418,7 @@ def compute_correlation(exp_name, use_complete_dataset=True, store_result=False)
         indexes = random.sample(list(range(len(train_dataset))), k=n_samples)
         train_subset = Subset(train_dataset, indexes)
         data_to_iterate = train_subset
-        
+
     loader = DataLoader(
         data_to_iterate, batch_size=64, num_workers=int(os.environ.get("SLURM_CPUS_PER_TASK", 4)))
 
@@ -431,12 +431,12 @@ def compute_correlation(exp_name, use_complete_dataset=True, store_result=False)
         colors = scene[:,1:][:,1::5]
         materials = scene[:,1:][:,2::5]
         shapes = scene[:,1:][:,3::5]
-        
+
         sizes = sizes[sizes != pad_idx].numpy()
         colors = colors[colors != pad_idx].numpy()
         materials = materials[materials != pad_idx].numpy()
         shapes = shapes[shapes != pad_idx].numpy()
-        
+
         all_sizes.append(sizes)
         all_colors.append(colors)
         all_materials.append(materials)
@@ -457,30 +457,30 @@ def compute_correlation(exp_name, use_complete_dataset=True, store_result=False)
 
     if not store_result:
         return all_nmi_scores
-        
+
     with open(f'outputs/results/{exp_name}.json') as fp:
         all_results = json.load(fp)
-    
+
     k_name = 'nmi_scores' if use_complete_dataset else 'sampled_nmi_scores'
     all_results[k_name] = all_nmi_scores
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-    
+
 
 def compute_p_score(exp_name, store_result=False, within_task=False):
     print(f'Computing P-Score for {exp_name}')
-    
+
     metric_key = 'p_scores_within_task' if within_task else 'p_scores'
-    
+
     # Updating results
     if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
         with open(f'outputs/results/{exp_name}.json') as fp:
             all_results = json.load(fp)
         if metric_key in all_results:
             return all_results[metric_key]
-    
+
     all_p_scores = compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=5,
                                     n_sampled_vertices=10, n_sampled_dichotomies=3500,
                                     dichotomy_within_task=within_task)
@@ -490,17 +490,17 @@ def compute_p_score(exp_name, store_result=False, within_task=False):
 
     with open(f'outputs/results/{exp_name}.json') as fp:
         all_results = json.load(fp)
-    
+
     all_results[metric_key] = all_p_scores
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-    
+
 
 def compute_o_score(exp_name, store_result=False, triplet_within_task=False, triplet_within_color_shape=False):
     print(f'Computing O-Score for {exp_name}')
-    
+
     if triplet_within_task:
         metric_key = 'o_scores_within_task'
     elif triplet_within_color_shape:
@@ -508,14 +508,14 @@ def compute_o_score(exp_name, store_result=False, triplet_within_task=False, tri
     else:
         metric_key = 'o_scores'
 
-    
+
     # # Updating results
     # if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
     #     with open(f'outputs/results/{exp_name}.json') as fp:
     #         all_results = json.load(fp)
     #     if metric_key in all_results:
     #         return all_results[metric_key]
-    
+
     all_o_scores = compute_o_scores(exp_name,
                                     n_samples=1024,
                                     n_seeds_to_try=5,
@@ -529,24 +529,24 @@ def compute_o_score(exp_name, store_result=False, triplet_within_task=False, tri
 
     with open(f'outputs/results/{exp_name}.json') as fp:
         all_results = json.load(fp)
-    
+
     all_results[metric_key] = all_o_scores
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-    
-    
+
+
 def compute_probing(exp_name, store_result=False):
     print(f'Computing Probing for {exp_name}')
-    
+
     # Updating results
     if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
         with open(f'outputs/results/{exp_name}.json') as fp:
             all_results = json.load(fp)
         if 'probing_metrics' in all_results:
             return all_results['probing_metrics']
-    
+
     all_probe_metrics = compute_probe_metrics(exp_name,
                                               n_seeds_to_try=5,
                                               n_samples=15_000,
@@ -557,11 +557,11 @@ def compute_probing(exp_name, store_result=False):
 
     with open(f'outputs/results/{exp_name}.json') as fp:
         all_results = json.load(fp)
-    
+
     all_results['probing_metrics'] = all_probe_metrics
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
-        
+
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
 
 
@@ -577,7 +577,7 @@ if __name__ == '__main__':
     parser.add_argument('--update_with_o_scores_within_task', action='store_true', default=False)
     parser.add_argument('--update_with_o_scores_within_color_shape', action='store_true', default=False)
     args = parser.parse_args()
-        
+
     # compute_nmi(args.exp_name, use_complete_dataset=False, store_result=True)
     # compute_nmi(args.exp_name, use_complete_dataset=True, store_result=True)
 
@@ -639,4 +639,3 @@ if __name__ == '__main__':
         except FileNotFoundError as e:
             print(f'Unable to update {args.exp_name}')
             print(str(e))
- 
