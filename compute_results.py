@@ -23,8 +23,6 @@ from lightning import Trainer
 from tqdm.auto import tqdm
 
 from p_score import compute_p_scores
-from o_score import compute_o_scores
-from probing import compute_probe_metrics
 from dci_score import compute_dci_metrics
 
 
@@ -203,15 +201,6 @@ def compute_results(exp_name, only_performance=False):
         print('Computing P-Scores')
         all_results['p_scores'] = compute_p_score(exp_name)
         all_results['p_scores_within_task'] = compute_p_score(exp_name, within_task=True)
-
-        # print('Computing O-Scores')
-        # all_results['o_scores'] = compute_o_score(exp_name)
-        # all_results['o_scores_within_task'] = compute_o_score(exp_name, triplet_within_task=True)
-        # all_results['o_scores_within_color_shape'] = compute_o_score(exp_name, triplet_within_color_shape=True)
-
-        # # all_results['correlation_scores'] = compute_correlation(exp_name, use_complete_dataset=True)
-        # print('Computing Probing')
-        # all_results['probing_metrics'] = compute_probing(exp_name)
 
     with open(f'outputs/results/{exp_name}.json', 'w') as fp:
         json.dump(all_results, fp)
@@ -397,79 +386,6 @@ def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
 
 
-def compute_correlation(exp_name, use_complete_dataset=True, store_result=False):
-    assert False, "Not implemented"
-    print(f'Computing NMIS Scores for {exp_name} (use_complete_dataset={use_complete_dataset})')
-
-    n_samples = 5_000
-
-    config = load_config(exp_name)
-    # pp.pprint(config)
-    config.vocabulary_path = config.vocabulary_path.replace('/storage-otro/', '/workspace1/')
-    config.base_path = config.base_path.replace('/storage-otro/', '/workspace1/')
-
-    train_dataset, *_ = build_datasets(config)
-    config.pad_idx = train_dataset.pad_idx
-    config.n_tokens = train_dataset.n_tokens
-
-    pad_idx = train_dataset.processor.vocabulary['[PAD]']
-
-    data_to_iterate = train_dataset
-    if not use_complete_dataset:
-        indexes = random.sample(list(range(len(train_dataset))), k=n_samples)
-        train_subset = Subset(train_dataset, indexes)
-        data_to_iterate = train_subset
-
-    loader = DataLoader(
-        data_to_iterate, batch_size=64, num_workers=int(os.environ.get("SLURM_CPUS_PER_TASK", 4)))
-
-    all_sizes = []
-    all_colors = []
-    all_materials = []
-    all_shapes = []
-    for _, scene in tqdm(loader):
-        sizes = scene[:,1:][:,0::5]
-        colors = scene[:,1:][:,1::5]
-        materials = scene[:,1:][:,2::5]
-        shapes = scene[:,1:][:,3::5]
-
-        sizes = sizes[sizes != pad_idx].numpy()
-        colors = colors[colors != pad_idx].numpy()
-        materials = materials[materials != pad_idx].numpy()
-        shapes = shapes[shapes != pad_idx].numpy()
-
-        all_sizes.append(sizes)
-        all_colors.append(colors)
-        all_materials.append(materials)
-        all_shapes.append(shapes)
-
-    all_sizes = np.concatenate(all_sizes)
-    all_colors = np.concatenate(all_colors)
-    all_materials = np.concatenate(all_materials)
-    all_shapes = np.concatenate(all_shapes)
-
-    task_variables = [
-        ('size', all_sizes), ('color', all_colors), ('material', all_materials), ('shape', all_shapes)]
-
-    all_nmi_scores = {}
-    for (t0_name, t0_variables), (t1_name, t1_variables) in product(task_variables, repeat=2):
-        all_nmi_scores[f'{t0_name}:{t1_name}'] = normalized_mutual_info_score(
-                                                                t0_variables, t1_variables)
-
-    if not store_result:
-        return all_nmi_scores
-
-    with open(f'outputs/results/{exp_name}.json') as fp:
-        all_results = json.load(fp)
-
-    k_name = 'nmi_scores' if use_complete_dataset else 'sampled_nmi_scores'
-    all_results[k_name] = all_nmi_scores
-    with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
-        json.dump(all_results, fp)
-
-    os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-
-
 def compute_p_score(exp_name, store_result=False, within_task=False):
     print(f'Computing P-Score for {exp_name}')
 
@@ -493,73 +409,6 @@ def compute_p_score(exp_name, store_result=False, within_task=False):
         all_results = json.load(fp)
 
     all_results[metric_key] = all_p_scores
-    with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
-        json.dump(all_results, fp)
-
-    os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-
-
-def compute_o_score(exp_name, store_result=False, triplet_within_task=False, triplet_within_color_shape=False):
-    print(f'Computing O-Score for {exp_name}')
-
-    if triplet_within_task:
-        metric_key = 'o_scores_within_task'
-    elif triplet_within_color_shape:
-        metric_key = 'o_scores_within_color_shape'
-    else:
-        metric_key = 'o_scores'
-
-
-    # # Updating results
-    # if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
-    #     with open(f'outputs/results/{exp_name}.json') as fp:
-    #         all_results = json.load(fp)
-    #     if metric_key in all_results:
-    #         return all_results[metric_key]
-
-    all_o_scores = compute_o_scores(exp_name,
-                                    n_samples=1024,
-                                    n_seeds_to_try=5,
-                                    n_sampled_vertices=10,
-                                    n_sampled_triplets=3500,
-                                    triplet_within_task=triplet_within_task,
-                                    triplet_within_color_shape=triplet_within_color_shape)
-
-    if not store_result:
-        return all_o_scores
-
-    with open(f'outputs/results/{exp_name}.json') as fp:
-        all_results = json.load(fp)
-
-    all_results[metric_key] = all_o_scores
-    with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
-        json.dump(all_results, fp)
-
-    os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-
-
-def compute_probing(exp_name, store_result=False):
-    print(f'Computing Probing for {exp_name}')
-
-    # Updating results
-    if store_result and os.path.exists(f'outputs/results/{exp_name}.json'):
-        with open(f'outputs/results/{exp_name}.json') as fp:
-            all_results = json.load(fp)
-        if 'probing_metrics' in all_results:
-            return all_results['probing_metrics']
-
-    all_probe_metrics = compute_probe_metrics(exp_name,
-                                              n_seeds_to_try=5,
-                                              n_samples=15_000,
-                                              n_objects_to_sample=15_000)
-
-    if not store_result:
-        return all_probe_metrics
-
-    with open(f'outputs/results/{exp_name}.json') as fp:
-        all_results = json.load(fp)
-
-    all_results['probing_metrics'] = all_probe_metrics
     with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
         json.dump(all_results, fp)
 
@@ -599,11 +448,7 @@ if __name__ == '__main__':
     parser.add_argument('--update_results_without_spheres', action='store_true', default=False)
     parser.add_argument('--update_with_p_scores', action='store_true', default=False)
     parser.add_argument('--update_with_p_scores_within_task', action='store_true', default=False)
-    parser.add_argument('--update_with_probe_metrics', action='store_true', default=False)
     parser.add_argument('--update_results_with_permuted_pixels', action='store_true', default=False)
-    parser.add_argument('--update_with_o_scores', action='store_true', default=False)
-    parser.add_argument('--update_with_o_scores_within_task', action='store_true', default=False)
-    parser.add_argument('--update_with_o_scores_within_color_shape', action='store_true', default=False)
     parser.add_argument('--update_with_dci_metrics', action='store_true', default=False)
     args = parser.parse_args()
 
@@ -621,18 +466,6 @@ if __name__ == '__main__':
     elif args.update_with_p_scores_within_task:
         fn_name = 'P-Score Within Task'
         fn_to_apply = partial(compute_p_score, store_result=True, within_task=True)
-    elif args.update_with_o_scores:
-        fn_name = 'O-Score'
-        fn_to_apply = partial(compute_o_score, store_result=True)
-    elif args.update_with_o_scores_within_task:
-        fn_name = 'O-Score Within Task'
-        fn_to_apply = partial(compute_o_score, store_result=True, triplet_within_task=True)
-    elif args.update_with_o_scores_within_color_shape:
-        fn_name = 'O-Score Within Task'
-        fn_to_apply = partial(compute_o_score, store_result=True, triplet_within_color_shape=True)
-    elif args.update_with_probe_metrics:
-        fn_name = 'Probing'
-        fn_to_apply = partial(compute_probing, store_result=True)
     elif args.update_with_dci_metrics:
         fn_name = 'DCI'
         fn_to_apply = partial(compute_dci, store_result=True)
