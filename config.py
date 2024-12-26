@@ -190,12 +190,28 @@ def load_config_from_checkpoint(checkpoint_path):
 
 
 def adapt_workspace_dir(config):
+    print('Adapting WORKSPACE Dir')
     # Adapt workspace to current host
-    old_workspace = config.base_path.split('/')[1]
     current_workspace = get_workspace()
+    if 'cenia' in config.base_path:
+        path_to_data_amd1 = '/work1/cenia/fidelrio/'
+        path_to_data_amd2 = '/work1/cenia/dflorea/../fidelrio/'
+        path_to_data_ialab = f'/{current_workspace}/fidelrio/CLEVR_CoGenT_v1.0/'
+        config.base_path = config.base_path.replace(path_to_data_amd1, path_to_data_ialab)
+        config.base_path = config.base_path.replace(path_to_data_amd2, path_to_data_ialab)
+        config.vocabulary_path = config.vocabulary_path.replace(path_to_data_amd1, path_to_data_ialab)
+        config.vocabulary_path = config.vocabulary_path.replace(path_to_data_amd2, path_to_data_ialab)
+        if hasattr(config, 'mixture_path'):
+            config.mixture_path = config.mixture_path.replace(path_to_data_amd1, path_to_data_ialab)
+            config.mixture_path = config.mixture_path.replace(path_to_data_amd2, path_to_data_ialab)
+        return
+
+    old_workspace = config.base_path.split('/')[1]
     if old_workspace != current_workspace:
         config.base_path = config.base_path.replace(old_workspace, current_workspace)
         config.vocabulary_path = config.vocabulary_path.replace(old_workspace, current_workspace)
+        if hasattr(config, 'mixture_path'):
+            config.mixture_path = config.mixture_path.replace(old_workspace, current_workspace)
 
 
 def get_non_default_args(parser, args):

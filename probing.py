@@ -28,6 +28,8 @@ class MetricEvaluator:
         self.device = torch.device('cuda')
         self.checkpoint = load_checkpoint(exp_name, epoch=None)
         self.config = load_config(exp_name)
+        print(self.config.base_path)
+        print(self.config.vocabulary_path)
 
         self.tasks = ['sizes', 'colors', 'materials', 'shapes']
 
@@ -37,6 +39,10 @@ class MetricEvaluator:
 
     def build_datasets(self):
         self.train_dataset, self.test_dataset, self.systematic_dataset, _ = build_datasets(self.config)
+        self.original_train_dataset = self.train_dataset
+        self.original_test_dataset = self.test_dataset
+        self.original_systematic_dataset = self.systematic_dataset
+
         self.config.pad_idx = self.train_dataset.pad_idx
         self.config.n_tokens = self.train_dataset.n_tokens
 
@@ -45,15 +51,17 @@ class MetricEvaluator:
         self.pad_token_idx = self.processor.vocabulary['[PAD]']
 
         self.complete_dataset = ConcatDataset((self.test_dataset, self.systematic_dataset))
+        self.original_complete_dataset = self.complete_dataset
+
+    def random_dataset_subset(self, dataset, k):
+        indices = random.sample(range(len(dataset)), k=k)
+        return Subset(dataset, indices)
 
     def sample_subset_datasets(self, scenes_to_sample):
         if scenes_to_sample is not None:
-            test_indices = random.sample(range(len(self.test_dataset)), k=scenes_to_sample)
-            self.test_dataset = Subset(self.test_dataset, test_indices)
-            systematic_indices = random.sample(range(len(self.systematic_dataset)), k=scenes_to_sample)
-            self.systematic_dataset = Subset(self.systematic_dataset, systematic_indices)
-            complete_indices = random.sample(range(len(self.complete_dataset)), k=scenes_to_sample)
-            self.complete_dataset = Subset(self.complete_dataset, complete_indices)
+            self.test_dataset = self.random_dataset_subset(self.original_test_dataset, k=scenes_to_sample)
+            self.systematic_dataset = self.random_dataset_subset(self.original_systematic_dataset, k=scenes_to_sample)
+            self.complete_dataset = self.random_dataset_subset(self.original_complete_dataset, k=scenes_to_sample)
 
     def build_models(self):
         self.model = MultimodalModel(self.config).to(self.device)
@@ -75,20 +83,23 @@ class MetricEvaluator:
             **{type_: len(tokens) for type_, tokens in self.token_types.items()}
         }
 
-    def build_dataloaders(self, batch_size, shuffle):
+    def build_dataloaders(self, batch_size, shuffle, num_workers):
         self.collators = {
             type_: CollatorForMaskedSelectedTokens(self.config, self.processor, tokens=tokens)
             for type_, tokens in self.token_types.items()
         }
+
         dlkwargs = {
             'batch_size': batch_size,
-            'num_workers': int(os.environ.get("SLURM_CPUS_PER_TASK", 4)),
+            'num_workers': num_workers,
             'pin_memory': torch.cuda.is_available(),
         }
+        print(f'Building DataLoader with num_workers: {dlkwargs["num_workers"]}')
         test_loaders = {}
         systematic_loaders = {}
         complete_loaders = {}
-        for task, collator in self.collators.items():
+        for task in self.tasks:
+            collator = self.collators[task]
             test_loaders[task] = DataLoader(
                 self.test_dataset, shuffle=shuffle, collate_fn=collator, **dlkwargs)
             systematic_loaders[task] = DataLoader(
@@ -123,7 +134,7 @@ class ProbeEvaluator(MetricEvaluator):
         self.fe = FeatureExtractor(self.model)
 
         # self.sample_subset_datasets(scenes_to_sample=15_000)
-        
+
         self.batch_size = 256
         self.probe_batch_size = 256
         self.hidden_sizes_to_try = [128]
@@ -136,7 +147,11 @@ class ProbeEvaluator(MetricEvaluator):
         feats_by_set = {}
         gt_by_set = {}
         props_by_set = {}
-        for test_name, loaders in self.build_dataloaders(batch_size, shuffle).items():
+
+        num_workers = max(int(os.environ.get("SLURM_CPUS_PER_TASK", 4)) - 2,0)
+        for test_name, loaders in self.build_dataloaders(
+                batch_size, shuffle, num_workers=num_workers).items():
+
             feats_by_task = defaultdict(list)
             gt_by_task = defaultdict(list)
             props_by_task = defaultdict(list)

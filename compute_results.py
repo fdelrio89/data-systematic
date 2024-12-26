@@ -25,6 +25,7 @@ from tqdm.auto import tqdm
 from p_score import compute_p_scores
 from o_score import compute_o_scores
 from probing import compute_probe_metrics
+from dci_score import compute_dci_metrics
 
 
 pp = pprint.PrettyPrinter(indent=2)
@@ -565,6 +566,33 @@ def compute_probing(exp_name, store_result=False):
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
 
 
+def compute_dci(exp_name, store_result=False, overwrite=False, n_samples=500):
+    print(f'Computing DCI for {exp_name}')
+
+    # Updating results
+    if store_result and not overwrite and os.path.exists(f'outputs/results/{exp_name}.json'):
+        with open(f'outputs/results/{exp_name}.json') as fp:
+            all_results = json.load(fp)
+        if 'dci_metrics' in all_results:
+            return all_results['dci_metrics']
+
+    all_dci_metrics = compute_dci_metrics(exp_name,
+                                          n_seeds_to_try=1,
+                                          n_samples=n_samples)
+
+    if not store_result:
+        return all_dci_metrics
+
+    with open(f'outputs/results/{exp_name}.json') as fp:
+        all_results = json.load(fp)
+
+    all_results['dci_metrics'] = all_dci_metrics
+    with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
+        json.dump(all_results, fp)
+
+    os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--exp_name", type=str)
@@ -576,6 +604,7 @@ if __name__ == '__main__':
     parser.add_argument('--update_with_o_scores', action='store_true', default=False)
     parser.add_argument('--update_with_o_scores_within_task', action='store_true', default=False)
     parser.add_argument('--update_with_o_scores_within_color_shape', action='store_true', default=False)
+    parser.add_argument('--update_with_dci_metrics', action='store_true', default=False)
     args = parser.parse_args()
 
     # compute_nmi(args.exp_name, use_complete_dataset=False, store_result=True)
@@ -604,6 +633,9 @@ if __name__ == '__main__':
     elif args.update_with_probe_metrics:
         fn_name = 'Probing'
         fn_to_apply = partial(compute_probing, store_result=True)
+    elif args.update_with_dci_metrics:
+        fn_name = 'DCI'
+        fn_to_apply = partial(compute_dci, store_result=True)
     elif args.update_results_with_permuted_pixels:
         fn_name = 'Permuted Pixels'
         fn_to_apply = update_results_with_permuted_pixels
@@ -615,9 +647,21 @@ if __name__ == '__main__':
         random.shuffle(exp_files)
         for exp_file in exp_files:
             exp_name = exp_file.stem
+            if 'test' in exp_name:
+                continue
             if 'multimodal-pretraining' in exp_name:
                 continue
-            if 'overloading' in exp_name and 'overloading_to=8.json' not in exp_name:
+            if 'overloading' in exp_name:
+                continue
+            if 'vqa' in exp_name:
+                continue
+            if 'trainset_subset' in exp_name:
+                continue
+            if 'd_hidden=' in exp_name:
+                continue
+            if 'episodic' in exp_name:
+                continue
+            if not any(f'{n}c' in exp_name for n in [8,27,64,125,216]):
                 continue
             # if 'seed' in exp_name:
             #     continue
@@ -630,6 +674,8 @@ if __name__ == '__main__':
             except FileNotFoundError as e:
                 print(f'Unable to update {exp_name}')
                 print(str(e))
+            except:
+                print(f'Unable to update {exp_name}')
     else:
         try:
             start = time.time()
