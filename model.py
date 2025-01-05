@@ -236,8 +236,8 @@ class MultimodalPretrainingModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         dl_name = ['val', 'systematic_val',
-                   'color_val', 'color_systematic_val', 
-                   'shape_val', 'shape_systematic_val', 
+                   'color_val', 'color_systematic_val',
+                   'shape_val', 'shape_systematic_val',
                    'color_common_systematic_val', 'shape_common_systematic_val'][dataloader_idx]
         images, scenes, labels = batch
 

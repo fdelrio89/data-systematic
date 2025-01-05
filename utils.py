@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import torch
 
+
 def load_checkpoint(exp_name, epoch=None):
     to_clean_int = lambda str_: ''.join(filter(str.isdigit, str_))
     get_version = lambda p: int(to_clean_int(p.stem)) if to_clean_int(p.stem) else 0
@@ -15,6 +16,7 @@ def load_checkpoint(exp_name, epoch=None):
 
     checkpoint = torch.load(resume_from_path)
     return checkpoint
+
 
 def only_in_amd_cluster(dec):
     def decorator(func):

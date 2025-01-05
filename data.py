@@ -59,9 +59,9 @@ def build_loader(dataset, config, shuffle=True, collate_fn=None, episodic_traini
             config, dataset.processor, mlm_probability=config.mlm_probability)
 
     if episodic_training:
-        if isinstance(dataset, CLEVRMultimodalSplit):
-            scenes_or_questions = dataset.scenes
-        elif isinstance(dataset, CLEVRSplit):
+        # if isinstance(dataset, CLEVRMultimodalSplit):
+        scenes_or_questions = dataset.scenes
+        if isinstance(dataset, CLEVRSplit):
             scenes_or_questions = dataset.questions
 
         dlkwargs['batch_sampler'] = EpisodicBatchSampler(scenes_or_questions, config.batch_size, shuffle=shuffle)
@@ -152,6 +152,7 @@ class EpisodicBatchSampler(Sampler):
                 yield next_batch
                 next_batch = []
 
+        yield next_batch
 
     def __len__(self):
         return math.ceil(self.ds_len / self.batch_size)
@@ -785,7 +786,9 @@ class CLEVRMultimodalSplit:
 
     @staticmethod
     def build_image_transform(config, train=True):
-        image_transform = [ToTensor(), Resize((224,224))]
+        resize = Resize((config.image_size,config.image_size))
+        image_transform = [ToTensor(), resize]
+
         if train and config.color_jitter:
             image_transform.append(ColorJitter(
                 brightness=config.color_jitter_brightness, hue=config.color_jitter_hue,
@@ -795,6 +798,7 @@ class CLEVRMultimodalSplit:
             image_transform.append(Normalize(0.5, 1))
         if config.permute_pixels:
             image_transform.append(RandomPixelShuffle())
+
         image_transform = Compose(image_transform)
         return image_transform
 

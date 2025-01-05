@@ -1,29 +1,8 @@
-from utils import in_amd_cluster
-
 from argparse import ArgumentParser
 import os
 from pathlib import Path
-
 import torch
-
-# class Config:
-#     def __init__(self):
-#         self.base_path = '/workspace1/fidelrio/CLEVR_CoGenT_v1.0'
-
-#         self.n_tokens = 117
-#         self.n_outputs = 28
-#         self.max_question_size = 45
-
-#         self.d_hidden = 128
-#         self.n_layers = 4
-#         self.nhead = 4
-#         self.patch_height = 32
-#         self.patch_width = 48
-#         self.num_patches = (320 // self.patch_height) * (480 // self.patch_width)
-
-#         self.batch_size = 256
-#         self.max_epochs = 50
-#         self.lr = 1e-3
+from utils import in_amd_cluster
 
 
 def load_config(experiment_name=""):
@@ -86,6 +65,7 @@ def read_args(defaults=False):
     parser.add_argument("--pad_idx", type=int, default=1)
     parser.add_argument("--n_tokens", type=int, default=96)
     parser.add_argument("--max_scene_size", type=int, default=50)
+    parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument('--not_normalize_image', action='store_true', default=False)
     parser.add_argument("--trainset_subset", type=float, default=1.)
     parser.add_argument('--permute_pixels', action='store_true', default=False)
@@ -152,7 +132,7 @@ def read_args(defaults=False):
 
     if args.use_vit_embedding or args.use_vit_embedding_loaded or args.use_embedding_loaded == 'vit':
         args.patch_height = args.patch_width = 16
-        args.n_patches = (224 // args.patch_height) * (224 // args.patch_width) + 1 # Add CLS
+        args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width) + 1 # Add CLS
         args.not_normalize_image = True
         args.adapt_embedding_from = 768
     if args.use_embedding_loaded == 'shrn50':
@@ -162,12 +142,12 @@ def read_args(defaults=False):
         args.adapt_embedding_from = 2048
     elif args.image_pretraining:
         args.patch_height = args.patch_width = 16
-        args.n_patches = (224 // args.patch_height) * (224 // args.patch_width) # + 1 Don't Add CLS
+        args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width) # + 1 Don't Add CLS
         args.not_normalize_image = True
     else:
         # args.n_patches = (320 // args.patch_height) * (480 // args.patch_width)
         args.patch_height = args.patch_width = 16
-        args.n_patches = (224 // args.patch_height) * (224 // args.patch_width)
+        args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width)
         args.not_normalize_image = False
 
     return args, parser
