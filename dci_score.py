@@ -4,7 +4,7 @@ import torch
 from tqdm.auto import tqdm
 import scipy
 from sklearn import ensemble
-from probing import MetricEvaluator, FeatureExtractor
+from evaluation import MetricEvaluator, FeatureExtractor
 
 
 class DCIEvaluator(MetricEvaluator):
