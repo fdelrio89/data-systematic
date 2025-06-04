@@ -78,7 +78,7 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
 
     checkpoint = load_checkpoint(exp_name, epoch=None)
     print('Checkpoint loaded from epoch:', checkpoint['epoch'])
-    
+
     config = load_config(exp_name)
 
     # config.vocabulary_path = config.vocabulary_path.replace('/workspace/' ,'/workspace1/')
@@ -93,7 +93,7 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
     processor = test_dataset.processor
     mask_token_idx = processor.vocabulary['[MASK]']
     pad_token_idx = processor.vocabulary['[PAD]']
-    
+
     def get_props(scenes):
         sizes = scenes[:,1:][:,0::5]
         colors = scenes[:,1:][:,1::5]
@@ -109,7 +109,7 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
     model = MultimodalModel(config).to(device)
     training_model = MultimodalPretrainingModel(model, config).to(device)
     training_model.load_state_dict(checkpoint['state_dict'])
-    
+
     vocab = processor.vocabulary
 
     colors_tokens = sorted(
@@ -146,15 +146,15 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
                         ('shapes', shapes_collator),
                         ('materials', materials_collator),
                         ('sizes', sizes_collator)]:
-        
+
         test_loaders[task] = DataLoader(
             pc_subset_test, shuffle=True, collate_fn=collator, **dlkwargs)
         systematic_loaders[task] = DataLoader(
             pc_subset_systematic, shuffle=True, collate_fn=collator, **dlkwargs)
         complete_loaders[task] = DataLoader(
             pc_subset_complete, shuffle=True, collate_fn=collator, **dlkwargs)
-        
-    
+
+
     feature_maps = []  # This will be a list of Tensors, each representing a feature map
 
     def hook_feat_map(mod, inp, out):
@@ -162,7 +162,7 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
         feature_maps.append(out)
 
     model.transformer.register_forward_hook(hook_feat_map)
-    
+
     all_p_scores = {}
     tasks = ['sizes', 'colors', 'materials', 'shapes']
     for test_name, loader in [
@@ -207,16 +207,16 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
 
                 unique_gts = gt.unique().tolist()
                 unique_tokens[task_idx] = unique_gts
-                
+
                 dichotomy_within_task_idx = None
                 if dichotomy_within_task:
                     dichotomy_within_task_idx = task_idx
-                
+
                 if not dichotomies:
                     dichotomies = all_possible_dichotomies(unique_tokens,
                                                            dichotomy_within_task_idx=dichotomy_within_task_idx)
                 possible_dichotomies = [p for p in dichotomies if is_possible(*p, prop_index=prop_index)]
-                
+
                 if n_sampled_dichotomies < len(possible_dichotomies):
                     sampled_dichotomies = random.sample(possible_dichotomies, k=n_sampled_dichotomies)
                 else:
@@ -235,7 +235,7 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
 
                         p_score = vec0 @ vec1 / (vec0.norm() * vec1.norm())
                         p_scores.append(float(p_score))
-                
+
                 all_p_scores[test_name][task].append(np.mean(p_scores))
 
     return all_p_scores

@@ -22,8 +22,8 @@ from utils import load_checkpoint
 from lightning import Trainer
 from tqdm.auto import tqdm
 
-from p_score import compute_p_scores
-from dci_score import compute_dci_metrics
+from evaluation.p_score import compute_p_scores
+from evaluation.dci_score import compute_dci_metrics
 
 
 pp = pprint.PrettyPrinter(indent=2)

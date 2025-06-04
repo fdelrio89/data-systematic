@@ -13,14 +13,7 @@ class DCIEvaluator(MetricEvaluator):
         super().__init__(exp_name)
 
         self.fe = FeatureExtractor(self.model)
-
-        # self.sample_subset_datasets(scenes_to_sample=15_000)
-        # if self.fast_mode:
-        #     self.tasks = ['colors', 'shapes']
         self.batch_size = 256
-        # self.probe_batch_size = 256
-        # self.hidden_sizes_to_try = [128]
-        # self.lrs_to_try = [1e-2, 1e-3]
 
     def extract_features_and_properties(self):
         print('extract_features_and_properties')

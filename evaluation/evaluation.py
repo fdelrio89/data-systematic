@@ -5,6 +5,7 @@ from config import load_config
 from data import build_datasets, ALL_POSSIBLE_COLORS
 from data import CollatorForMaskedSelectedTokens
 from model import MultimodalModel, MultimodalPretrainingModel
+from utils import load_checkpoint
 
 class MetricEvaluator:
     def __init__(self, exp_name):
