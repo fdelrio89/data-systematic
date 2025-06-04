@@ -2,7 +2,6 @@ from argparse import ArgumentParser
 import os
 from pathlib import Path
 import torch
-from utils import in_amd_cluster
 
 
 def load_config(experiment_name=""):
@@ -16,7 +15,6 @@ def load_config(experiment_name=""):
         return config
 
     if not experiment_name:
-        # experiment_name = os.environ.get("EXP_NAME", experiment_name)
         experiment_name = config.experiment_name
 
     to_clean_int = lambda str_: ''.join(filter(str.isdigit, str_))
@@ -26,7 +24,6 @@ def load_config(experiment_name=""):
     checkpoint_paths = Path(f'{config.outputs_path}/{experiment_name}/').glob('last*.ckpt')
     checkpoint_paths = sorted(checkpoint_paths, key=get_version, reverse=True)
     checkpoint_path = str(checkpoint_paths[0])
-    # checkpoint_path = f"outputs/{experiment_name}/last.ckpt"
 
     print(f'Loading {experiment_name} last checkpoint config from {checkpoint_path}')
     checkpoint_config = load_config_from_checkpoint(checkpoint_path)
@@ -53,22 +50,21 @@ def read_args(defaults=False):
 
     parser.add_argument("--experiment_name", type=str, default='default')
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0')
-    parser.add_argument("--mixture_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0')
+    parser.add_argument("--base_path", type=str, default='data/CLEVR_CoGenT_v1.0')
+    parser.add_argument("--mixture_path", type=str, default='data/CLEVR_CoGenT_v1.0')
     parser.add_argument("--p_mixture", type=float, default=0.)
     parser.add_argument("--outputs_path", type=str, default='./outputs')
     parser.add_argument("--comet_experiment_key", type=str, default=None)
     parser.add_argument("--wandb_experiment_id", type=str, default=None)
 
     # Data
-    parser.add_argument("--vocabulary_path", type=str, default='/workspace1/fidelrio/CLEVR_CoGenT_v1.0/vocab.txt')
+    parser.add_argument("--vocabulary_path", type=str, default='data/CLEVR_CoGenT_v1.0/vocab.txt')
     parser.add_argument("--pad_idx", type=int, default=1)
     parser.add_argument("--n_tokens", type=int, default=96)
     parser.add_argument("--max_scene_size", type=int, default=50)
     parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument('--not_normalize_image', action='store_true', default=False)
     parser.add_argument("--trainset_subset", type=float, default=1.)
-    parser.add_argument('--permute_pixels', action='store_true', default=False)
     parser.add_argument('--color_jitter', action='store_true', default=False)
     parser.add_argument("--color_jitter_brightness", type=float, default=0.0)
     parser.add_argument("--color_jitter_hue", type=float, default=0.0)
@@ -93,36 +89,19 @@ def read_args(defaults=False):
 
     # Operational
     parser.add_argument('--resume_training', action='store_true', default=False)
-    parser.add_argument('--profile', action='store_true', default=False)
 
     # Experimental
-    parser.add_argument('--image_pretraining', action='store_true', default=False)
     parser.add_argument('--multimodal_pretraining', action='store_true', default=False)
-    parser.add_argument('--multimodal_training', action='store_true', default=False)
-    parser.add_argument('--aug_zero', type=int, default=1)
-    parser.add_argument("--aug_zero_independent", action='store_true', default=False)
-    parser.add_argument("--aug_zero_color", action='store_true', default=False)
     parser.add_argument('--token_translation_path', type=str, default='')
-    parser.add_argument('--use_curriculum', action='store_true', default=False)
-    parser.add_argument('--episodic_training', action='store_true', default=False)
 
     # Legacy
     parser.add_argument("--n_outputs", type=int, default=28)
     parser.add_argument("--rels_to_sample", type=int, default=0)
     parser.add_argument("--mp_probability", type=float, default=0.75)
-    parser.add_argument("--max_question_size", type=int, default=45)
-    parser.add_argument('--use_txt_scene', action='store_true', default=False)
     parser.add_argument('--not_only_front_right_relations', dest='only_front_right_relations', action='store_false', default=True)
     parser.add_argument('--dont_filter_symmetric_relations', dest='filter_symmetric_relations', action='store_false', default=True)
     parser.add_argument('--display_object_properties', action='store_true', default=False)
     parser.add_argument('--dont_shuffle_object_identities', dest='shuffle_object_identities', action='store_false', default=True)
-
-    # Pretrained Image Embeddings
-    parser.add_argument('--use_vit_embedding', action='store_true', default=False)
-    parser.add_argument('--use_vit_embedding_loaded', action='store_true', default=False)
-    parser.add_argument('--freeze_vit_embedding', action='store_true', default=False)
-    parser.add_argument('--use_embedding_loaded', type=str, default='')
-    parser.add_argument('--adapt_embedding_from', type=int, default=0)
 
     # Parse the user inputs and defaults (returns a argparse.Namespace)
     if is_notebook() or defaults:
@@ -130,68 +109,17 @@ def read_args(defaults=False):
     else:
         args = parser.parse_args()
 
-    if args.use_vit_embedding or args.use_vit_embedding_loaded or args.use_embedding_loaded == 'vit':
-        args.patch_height = args.patch_width = 16
-        args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width) + 1 # Add CLS
-        args.not_normalize_image = True
-        args.adapt_embedding_from = 768
-    if args.use_embedding_loaded == 'shrn50':
-        args.patch_height = args.patch_width = 32
-        args.n_patches = 49 # Add CLS
-        args.not_normalize_image = True
-        args.adapt_embedding_from = 2048
-    elif args.image_pretraining:
-        args.patch_height = args.patch_width = 16
-        args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width) # + 1 Don't Add CLS
-        args.not_normalize_image = True
-    else:
-        # args.n_patches = (320 // args.patch_height) * (480 // args.patch_width)
-        args.patch_height = args.patch_width = 16
-        args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width)
-        args.not_normalize_image = False
+    args.patch_height = args.patch_width = 16
+    args.n_patches = (args.image_size // args.patch_height) * (args.image_size  // args.patch_width)
+    args.not_normalize_image = False
 
     return args, parser
-
-
-def get_workspace():
-    import socket
-    return {
-        'yodaxico': 'workspace',
-        'ahsoka': 'storage-otro',
-    }.get(socket.gethostname(), 'workspace1')
 
 
 def load_config_from_checkpoint(checkpoint_path):
     checkpoint = torch.load(checkpoint_path)
     config = checkpoint['hyper_parameters']['config']
-    if not in_amd_cluster():
-        adapt_workspace_dir(config)
     return config
-
-
-def adapt_workspace_dir(config):
-    print('Adapting WORKSPACE Dir')
-    # Adapt workspace to current host
-    current_workspace = get_workspace()
-    if 'cenia' in config.base_path:
-        path_to_data_amd1 = '/work1/cenia/fidelrio/'
-        path_to_data_amd2 = '/work1/cenia/dflorea/../fidelrio/'
-        path_to_data_ialab = f'/{current_workspace}/fidelrio/CLEVR_CoGenT_v1.0/'
-        config.base_path = config.base_path.replace(path_to_data_amd1, path_to_data_ialab)
-        config.base_path = config.base_path.replace(path_to_data_amd2, path_to_data_ialab)
-        config.vocabulary_path = config.vocabulary_path.replace(path_to_data_amd1, path_to_data_ialab)
-        config.vocabulary_path = config.vocabulary_path.replace(path_to_data_amd2, path_to_data_ialab)
-        if hasattr(config, 'mixture_path'):
-            config.mixture_path = config.mixture_path.replace(path_to_data_amd1, path_to_data_ialab)
-            config.mixture_path = config.mixture_path.replace(path_to_data_amd2, path_to_data_ialab)
-        return
-
-    old_workspace = config.base_path.split('/')[1]
-    if old_workspace != current_workspace:
-        config.base_path = config.base_path.replace(old_workspace, current_workspace)
-        config.vocabulary_path = config.vocabulary_path.replace(old_workspace, current_workspace)
-        if hasattr(config, 'mixture_path'):
-            config.mixture_path = config.mixture_path.replace(old_workspace, current_workspace)
 
 
 def get_non_default_args(parser, args):

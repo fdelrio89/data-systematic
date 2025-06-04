@@ -1,6 +1,4 @@
 import os
-# os.chdir('/mnt/ialabnas/homes/fidelrio/systematic-text-representations/')
-
 from collections import defaultdict
 import json
 import random
@@ -80,9 +78,6 @@ def compute_p_scores(exp_name, n_samples=1024, n_seeds_to_try=10, n_sampled_vert
     print('Checkpoint loaded from epoch:', checkpoint['epoch'])
 
     config = load_config(exp_name)
-
-    # config.vocabulary_path = config.vocabulary_path.replace('/workspace/' ,'/workspace1/')
-    # config.base_path = config.base_path.replace('/workspace/' ,'/workspace1/')
 
     train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
     config.pad_idx = train_dataset.pad_idx

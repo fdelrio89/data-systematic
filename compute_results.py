@@ -15,7 +15,7 @@ from sklearn.metrics.cluster import normalized_mutual_info_score
 
 from config import load_config
 from data import build_datasets
-from data import CollatorForMaskedSelectedTokens, CollatorForMaskedRandomSelectedTokens, CollatorForMaskedVQA
+from data import CollatorForMaskedSelectedTokens, CollatorForMaskedRandomSelectedTokens
 from data import ALL_POSSIBLE_COLORS
 from model import MultimodalModel, MultimodalPretrainingModel
 from utils import load_checkpoint
@@ -58,16 +58,6 @@ def build_collate_fns(dataset, config, dont_mask_spheres=False):
         'size':  1 / len(size_tokens),
         'identity':  1 / len(processor.vocabulary),
     }
-
-    if not config.multimodal_pretraining:
-        vqa_collator = CollatorForMaskedVQA(config, dataset.processor)
-        return {
-            'random_without_testing_spheres': [
-                ('color', vqa_collator),
-                ('shapes', vqa_collator),
-                ('materials', vqa_collator),
-                ('size', vqa_collator),
-        ]}, random_baseline
 
     collate_fns = {
         'selected': [
@@ -117,38 +107,14 @@ def build_test_data(config):
     systematic_datasets = {}
     cmn_systematic_datasets = {}
 
-    if config.multimodal_pretraining:
-        train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
-        config.pad_idx = train_dataset.pad_idx
-        config.n_tokens = train_dataset.n_tokens
+    train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
+    config.pad_idx = train_dataset.pad_idx
+    config.n_tokens = train_dataset.n_tokens
 
-        property_queries = ['shapes', 'size', 'color', 'materials']
-        test_datasets = {prop: test_dataset for prop in property_queries}
-        systematic_datasets = {prop: systematic_dataset for prop in property_queries}
-        cmn_systematic_datasets = {prop: common_systematic_dataset for prop in property_queries}
-    else:
-        (train_dataset,
-         test_datasets['all'],
-         test_datasets['shapes'],
-         test_datasets['size'],
-         test_datasets['color'],
-         test_datasets['materials'],
-         systematic_datasets['all'],
-         systematic_datasets['shapes'],
-         systematic_datasets['size'],
-         systematic_datasets['color'],
-         systematic_datasets['materials'],
-         cmn_systematic_datasets['all'],
-         cmn_systematic_datasets['shapes'],
-         cmn_systematic_datasets['size'],
-         cmn_systematic_datasets['color'],
-         cmn_systematic_datasets['materials']
-         ) = build_datasets(config)
-
-        config.pad_idx = train_dataset.pad_idx
-        config.n_tokens = train_dataset.n_tokens
-
-    return train_dataset, test_datasets, systematic_datasets, cmn_systematic_datasets
+    property_queries = ['shapes', 'size', 'color', 'materials']
+    test_datasets = {prop: test_dataset for prop in property_queries}
+    systematic_datasets = {prop: systematic_dataset for prop in property_queries}
+    cmn_systematic_datasets = {prop: common_systematic_dataset for prop in property_queries}
 
 def compute_performance_results(exp_name):
     checkpoint = load_checkpoint(exp_name)
@@ -210,12 +176,6 @@ def update_results_without_spheres(exp_name):
     checkpoint = load_checkpoint(exp_name)
     config = load_config(exp_name)
 
-    # workspace_path = ''
-    config.vocabulary_path = config.vocabulary_path.replace('/workspace1/' ,'/workspace/')
-    config.base_path = config.base_path.replace('/workspace1/' ,'/workspace/')
-    # config.vocabulary_path = config.vocabulary_path.replace('/workspace/' ,'/workspace1/')
-    # config.base_path = config.base_path.replace('/workspace/' ,'/workspace1/')
-
     train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
     config.pad_idx = train_dataset.pad_idx
 
@@ -261,58 +221,6 @@ def update_results_without_spheres(exp_name):
 
     os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
 
-def update_results_with_permuted_pixels(exp_name):
-    checkpoint = load_checkpoint(exp_name)
-    config = load_config(exp_name)
-
-    config.permute_pixels = True
-
-    # workspace_path = ''
-    config.vocabulary_path = config.vocabulary_path.replace('/workspace/' ,'/workspace1/')
-    config.base_path = config.base_path.replace('/workspace/' ,'/workspace1/')
-
-    train_dataset, test_dataset, systematic_dataset, common_systematic_dataset = build_datasets(config)
-    config.pad_idx = train_dataset.pad_idx
-
-    training_model = load_training_model(config, checkpoint)
-    trainer = Trainer(max_epochs=config.max_epochs,
-                    accelerator="gpu",
-                    devices=torch.cuda.device_count()
-    )
-
-    try:
-        with open(f'outputs/results/{exp_name}.json') as fp:
-            all_results = json.load(fp)
-    except FileNotFoundError as e:
-        all_results = {}
-
-    collate_fns, random_baseline = build_collate_fns(train_dataset, config)
-
-    new_collate_fns = {}
-    new_collate_fns['permuted_pixels'] = collate_fns['random']
-    for type_, fns_by_category in new_collate_fns.items():
-        results = {}
-        for name, collate_fn in fns_by_category:
-            train_loader = build_loader(train_dataset, collate_fn=collate_fn)
-            test_loader = build_loader(test_dataset, collate_fn=collate_fn)
-            systematic_loader = build_loader(systematic_dataset, collate_fn=collate_fn)
-            common_systematic_loader = build_loader(common_systematic_dataset, collate_fn=collate_fn)
-
-            test_results = trainer.test(training_model, dataloaders=[test_loader, systematic_loader])
-            raw_results = trainer.test(training_model, dataloaders=[train_loader, common_systematic_loader])
-            train_results = [
-                {k.replace('test_', 'train_'): v for k, v in raw_results[0].items()}]
-            common_results = [
-                {k.replace('systematic_test', 'common_systematic_test'): v for k, v in raw_results[1].items()}]
-            results[name] = test_results + train_results + common_results
-
-        all_results[type_] = results
-
-    with open(f'outputs/results/{exp_name}.json.tmp', 'w') as fp:
-        json.dump(all_results, fp)
-
-    os.rename(f'outputs/results/{exp_name}.json.tmp', f'outputs/results/{exp_name}.json')
-
 
 def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
     print(f'Computing NMIS Scores for {exp_name} (use_complete_dataset={use_complete_dataset})')
@@ -320,9 +228,6 @@ def compute_nmi(exp_name, use_complete_dataset=True, store_result=False):
     n_samples = 5_000
 
     config = load_config(exp_name)
-    # pp.pprint(config)
-    config.vocabulary_path = config.vocabulary_path.replace('/storage-otro/', '/workspace1/')
-    config.base_path = config.base_path.replace('/storage-otro/', '/workspace1/')
 
     train_dataset, *_ = build_datasets(config)
     config.pad_idx = train_dataset.pad_idx
@@ -452,9 +357,6 @@ if __name__ == '__main__':
     parser.add_argument('--update_with_dci_metrics', action='store_true', default=False)
     args = parser.parse_args()
 
-    # compute_nmi(args.exp_name, use_complete_dataset=False, store_result=True)
-    # compute_nmi(args.exp_name, use_complete_dataset=True, store_result=True)
-
     fn_name = 'Complete Results'
     fn_to_apply = compute_results
     if args.update_results_without_spheres:
@@ -469,9 +371,6 @@ if __name__ == '__main__':
     elif args.update_with_dci_metrics:
         fn_name = 'DCI'
         fn_to_apply = partial(compute_dci, store_result=True)
-    elif args.update_results_with_permuted_pixels:
-        fn_name = 'Permuted Pixels'
-        fn_to_apply = update_results_with_permuted_pixels
 
     path_obj = Path(args.exp_name)
     if path_obj.is_dir():
@@ -480,24 +379,6 @@ if __name__ == '__main__':
         random.shuffle(exp_files)
         for exp_file in exp_files:
             exp_name = exp_file.stem
-            if 'test' in exp_name:
-                continue
-            if 'multimodal-pretraining' in exp_name:
-                continue
-            if 'overloading' in exp_name:
-                continue
-            if 'vqa' in exp_name:
-                continue
-            if 'trainset_subset' in exp_name:
-                continue
-            if 'd_hidden=' in exp_name:
-                continue
-            if 'episodic' in exp_name:
-                continue
-            if not any(f'{n}c' in exp_name for n in [8,27,64,125,216]):
-                continue
-            # if 'seed' in exp_name:
-            #     continue
             print(f'Updating {fn_name} for {exp_name}')
             try:
                 start = time.time()
